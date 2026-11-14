@@ -6,6 +6,7 @@
 import type { DshScheduleAdapter } from '../adapters/dsh-schedule.js';
 import type { DatabaseSync } from 'node:sqlite';
 import { randomUUID } from '../utils/id.js';
+import { normalizeScheduleTiming } from '../protocols/schedule-timing.js';
 import { ScheduleBindingRepository } from '../database/repository/schedule-binding-repository.js';
 import type { ScheduleBindingRow } from '../database/repository/schedule-binding-repository.js';
 
@@ -36,20 +37,22 @@ export class SchedulerService {
 
   /**
    * 建立 Router 巡检调度：Host 任务投递到 Router 会话（session 目标）。
+   * timing 接受模型友好形态（如 {kind:'daily', time:'09:00'}），由归一化器映射到 Host 真实契约。
    * @returns Host 任务 ID（已登记绑定）
    */
   async setRouterReview(input: {
     title: string;
     prompt: string;
-    timing: Parameters<DshScheduleAdapter['createTask']>[0]['timing'];
+    timing: unknown;
     routerSessionId: string;
     scopeJson?: string;
   }): Promise<string> {
+    const timing = normalizeScheduleTiming(input.timing);
     const entry = await this.adapter.createTask(
       {
         title: input.title,
         prompt: input.prompt,
-        timing: input.timing,
+        timing,
         target: { kind: 'session', sessionId: input.routerSessionId },
       },
       input.routerSessionId,

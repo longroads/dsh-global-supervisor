@@ -272,10 +272,15 @@ export function buildSupervisorTools(stack: SupervisorStack): ToolDefinition[] {
 
   tools.push(makeTool({
     name: 'supervisor_schedule_set',
-    description: '设置 Router 定时巡检（DSH 原生 Host Schedule；timing 形如 {kind:"daily", ...}）',
+    description: '设置 Router 定时巡检（DSH 原生 Host Schedule）。timing 用友好形态：{kind:"daily", time:"09:00"}；也支持 every（every_seconds 或 minutes）、after（after_seconds）、weekly（time + weekdays 1-7）、cron（expression 五段式）、at（ISO 时刻）、rrule（字符串）。缺省时区取本机时区。',
     parameters: OBJ({
-      title: { type: 'string' }, prompt: { type: 'string', description: '每次触发投递给 Router 的指令' },
-      timing: { type: 'object', description: '调度规则（after/at/every/daily/weekly/cron/rrule 之一）', additionalProperties: true },
+      title: { type: 'string', description: '任务名（如"每日巡检"）' },
+      prompt: { type: 'string', description: '每次触发投递给 Router 的指令' },
+      timing: {
+        type: 'object',
+        description: '调度规则；例：{"kind":"daily","time":"09:00"}；{"kind":"every","minutes":30}；{"kind":"weekly","time":"09:00","weekdays":[1,2,3,4,5]}；{"kind":"cron","expression":"0 9 * * *"}',
+        additionalProperties: true,
+      },
     }, ['title', 'prompt', 'timing']),
     resultSchema: RESULT,
     guard, guardDeniedMessage: DENIED,
@@ -287,7 +292,7 @@ export function buildSupervisorTools(stack: SupervisorStack): ToolDefinition[] {
         const scheduleId = await stack.scheduler.setRouterReview({
           title: stringArg(record, 'title'),
           prompt: stringArg(record, 'prompt'),
-          timing: timing as never,
+          timing,
           routerSessionId: stack.routerIdentity.ownerSessionId(),
         });
         return { ok: true, schedule_id: scheduleId };
