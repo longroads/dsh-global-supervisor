@@ -9,13 +9,14 @@ import type { DshAgentAdapter } from '../adapters/dsh-agent.js';
 export class SessionDirectNotifier {
   constructor(
     private readonly agents: DshAgentAdapter,
-    private readonly routerSessionId: string,
+    /** Router 代表会话解析（认领制下动态读取，见 RouterIdentity.ownerSessionId） */
+    private readonly resolveOwnerSession: () => string,
   ) {}
 
   /** 唤醒 Router 会话转述一条通知。 */
   async notify(message: string): Promise<boolean> {
     try {
-      await this.agents.dispatch(this.routerSessionId, `【supervisor 通知】${message}`);
+      await this.agents.dispatch(this.resolveOwnerSession(), `【supervisor 通知】${message}`);
       return true;
     } catch {
       return false;

@@ -7,12 +7,12 @@ import type { ToolDefinition } from '@deepseek-ai/dsh-tools';
 import type { SupervisorStack } from '../runtime.js';
 import { asRecord, intArg, makeTool, optionalStringArg, stringArg } from './toolkit.js';
 
-/** Router 守卫：仅固定 Router 会话可调用。 */
-function routerGuard(routerSessionId: string) {
-  return (caller: string) => caller === routerSessionId;
+/** Router 守卫：经 RouterIdentity 动态判定（运行时认领制，见 services/router-identity.ts）。 */
+function routerGuard(stack: SupervisorStack) {
+  return (caller: string) => stack.routerIdentity.isRouter(caller);
 }
 
-const DENIED = '仅 Router 会话可调用 supervisor 工具';
+const DENIED = '仅 Router 会话可调用 supervisor 工具（首次使用可在目标会话调用 supervisor_claim_router 认领）';
 
 const OBJ = (properties: Record<string, unknown>, required: string[] = []): Record<string, unknown> => ({
   type: 'object',
@@ -23,11 +23,33 @@ const OBJ = (properties: Record<string, unknown>, required: string[] = []): Reco
 /** 结果 schema（宽松对象：工具结果字段较多，统一由 render 全量输出）。 */
 const RESULT = { type: 'object', properties: { ok: { type: 'boolean' } }, additionalProperties: true } as const;
 
-/** 构建 14 个 Router 工具。 */
-export function buildSupervisorTools(stack: SupervisorStack, routerSessionId: string): ToolDefinition[] {
-  const guard = routerGuard(routerSessionId);
-  const routerActor = { sessionId: routerSessionId, role: 'router' as const };
+/** 构建 Router 工具（15 个管理工具 + 1 个认领工具）。 */
+export function buildSupervisorTools(stack: SupervisorStack): ToolDefinition[] {
+  const guard = routerGuard(stack);
+  const routerActor = () => ({ sessionId: stack.routerIdentity.ownerSessionId(), role: 'router' as const });
   const tools: ToolDefinition[] = [];
+
+  tools.push(makeTool({
+    name: 'supervisor_claim_router',
+    description: '认领/换绑 Router 身份（首次使用入口：无 Router 时任何会话可认领；已有 Router 时仅当前 Router 可换绑）。mode=session 仅本会话；mode=workspace 需 workspace_id，该工作区下全部会话均为 Router',
+    parameters: OBJ({
+      mode: { type: 'string', description: 'session 或 workspace' },
+      workspace_id: { type: 'string', description: 'workspace 模式必填' },
+    }, ['mode']),
+    resultSchema: RESULT,
+    guard: () => true,
+    guardDeniedMessage: '',
+    handler: async (args, ctx) => {
+      const record = asRecord(args);
+      const mode = stringArg(record, 'mode') === 'workspace' ? 'workspace' : 'session';
+      const result = await stack.routerIdentity.claim({
+        callerSessionId: ctx.callerSessionId,
+        mode,
+        workspaceId: optionalStringArg(record, 'workspace_id'),
+      });
+      return { ...result, current: stack.routerIdentity.current() };
+    },
+  }));
 
   tools.push(makeTool({
     name: 'supervisor_workspace_list',
@@ -249,7 +271,7 @@ export function buildSupervisorTools(stack: SupervisorStack, routerSessionId: st
     parameters: OBJ({ workspace_id: { type: 'string' }, focus: { type: 'string', description: '巡检关注点（可选）' } }, ['workspace_id']),
     resultSchema: RESULT,
     guard, guardDeniedMessage: DENIED,
-    handler: (args, ctx) => reviewProject(stack, asRecord(args), ctx.callerSessionId, routerActor),
+    handler: (args, ctx) => reviewProject(stack, asRecord(args), ctx.callerSessionId, routerActor()),
   }));
 
   tools.push(makeTool({
@@ -263,7 +285,7 @@ export function buildSupervisorTools(stack: SupervisorStack, routerSessionId: st
       const projects = await stack.workspaceManager.listProjects();
       const results: Array<{ project: string; ok: boolean; reason: string }> = [];
       for (const project of projects.filter((p) => p.status === 'active')) {
-        const outcome = await reviewProject(stack, { workspace_id: project.workspaceId, focus: record['focus'] }, ctx.callerSessionId, routerActor);
+        const outcome = await reviewProject(stack, { workspace_id: project.workspaceId, focus: record['focus'] }, ctx.callerSessionId, routerActor());
         results.push({ project: project.title, ok: outcome.ok, reason: outcome.reason });
       }
       return { ok: true, reviewed: results.filter((r) => r.ok).length, skipped: results.filter((r) => !r.ok).length, results };
@@ -288,7 +310,7 @@ export function buildSupervisorTools(stack: SupervisorStack, routerSessionId: st
           title: stringArg(record, 'title'),
           prompt: stringArg(record, 'prompt'),
           timing: timing as never,
-          routerSessionId,
+          routerSessionId: stack.routerIdentity.ownerSessionId(),
         });
         return { ok: true, schedule_id: scheduleId };
       } catch (error) {

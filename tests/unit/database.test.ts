@@ -19,10 +19,10 @@ afterEach(async () => {
 });
 
 describe('数据库连接与迁移', async () => {
-  it(':memory: 打开即迁移到版本 1', async () => {
+  it(':memory: 打开即迁移到最新版本', async () => {
     const db = await openDatabase(':memory:');
     const row = db.prepare('SELECT MAX(version) AS v FROM schema_version').get() as { v: number };
-    expect(row.v).toBe(1);
+    expect(row.v).toBeGreaterThanOrEqual(2);
     db.close();
   });
 
@@ -32,8 +32,8 @@ describe('数据库连接与迁移', async () => {
     db1.close();
     const db2 = await openDatabase(path);
     const row = db2.prepare('SELECT COUNT(*) AS n, MAX(version) AS v FROM schema_version').get() as { n: number; v: number };
-    expect(row.n).toBe(1);
-    expect(row.v).toBe(1);
+    expect(row.n).toBe(2);
+    expect(row.v).toBeGreaterThanOrEqual(2);
     db2.close();
   });
 

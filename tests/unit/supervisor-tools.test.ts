@@ -9,6 +9,7 @@ import { DshWorkspaceAdapter } from '../../src/adapters/dsh-workspace.js';
 import { AgentController } from '../../src/services/agent-controller.js';
 import { EventManager } from '../../src/services/event-manager.js';
 import { ProjectMonitor } from '../../src/services/project-monitor.js';
+import { RouterIdentity } from '../../src/services/router-identity.js';
 import { SchedulerService } from '../../src/services/scheduler.js';
 import { SessionDirectNotifier } from '../../src/services/notifier.js';
 import { TaskManager } from '../../src/services/task-manager.js';
@@ -43,7 +44,8 @@ async function buildStack(): Promise<SupervisorStack> {
     eventManager: new EventManager(db),
     sessionAdapter: new DshSessionAdapter(fakeCtx),
     monitor: new ProjectMonitor(taskManager),
-    notifier: new SessionDirectNotifier(agentAdapter, ROUTER_SESSION),
+    notifier: new SessionDirectNotifier(agentAdapter, () => ROUTER_SESSION),
+    routerIdentity: new RouterIdentity(db, ROUTER_SESSION),
   };
 }
 
@@ -80,7 +82,7 @@ describe('makeTool 权限中间件', () => {
 describe('supervisor 工具权限与任务流', () => {
   it('非 Router 会话调用一律 forbidden', async () => {
     const stack = await buildStack();
-    const tools = buildSupervisorTools(stack, ROUTER_SESSION);
+    const tools = buildSupervisorTools(stack);
     const listTool = tools.find((t) => t.name === 'supervisor_workspace_list') as ToolDefinition;
     const denied = await listTool.execute({}, execOf(WORKER_SESSION));
     expect(isGuardDenied(denied)).toBe(true);
@@ -88,7 +90,7 @@ describe('supervisor 工具权限与任务流', () => {
 
   it('Router 创建任务（pending）并出现在列表', async () => {
     const stack = await buildStack();
-    const tools = buildSupervisorTools(stack, ROUTER_SESSION);
+    const tools = buildSupervisorTools(stack);
     const create = tools.find((t) => t.name === 'supervisor_task_create') as ToolDefinition;
     const list = tools.find((t) => t.name === 'supervisor_task_list') as ToolDefinition;
     const created = await create.execute(

@@ -131,6 +131,17 @@ export const MIGRATIONS: readonly Migration[] = [
       CREATE INDEX idx_audit_target ON audit_logs(target_type, target_id);
     `,
   },
+  {
+    version: 2,
+    name: 'plugin-settings-KV',
+    up: `
+      CREATE TABLE plugin_settings (
+        key TEXT PRIMARY KEY,
+        value_json TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+    `,
+  },
 ];
 
 /** 迁移执行器：按 version 升序应用未执行的迁移，每条独立事务。 */

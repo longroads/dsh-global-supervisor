@@ -11,6 +11,7 @@ import type { DatabaseSync } from 'node:sqlite';
 import { EventManager } from './services/event-manager.js';
 import { AgentController } from './services/agent-controller.js';
 import { ProjectMonitor } from './services/project-monitor.js';
+import { RouterIdentity } from './services/router-identity.js';
 import { SchedulerService } from './services/scheduler.js';
 import { SessionDirectNotifier } from './services/notifier.js';
 import { TaskManager } from './services/task-manager.js';
@@ -28,6 +29,7 @@ export interface SupervisorStack {
   sessionAdapter: DshSessionAdapter;
   monitor: ProjectMonitor;
   notifier: SessionDirectNotifier;
+  routerIdentity: RouterIdentity;
 }
 
 /** 数据库文件名（位于插件数据目录下）。 */
@@ -51,7 +53,11 @@ export async function createStack(ctx: Context, options: { dataDir?: string; rou
   const agentController = new AgentController(agentAdapter, taskManager, db);
   const scheduler = new SchedulerService(scheduleAdapter, db);
   const monitor = new ProjectMonitor(taskManager);
-  const notifier = new SessionDirectNotifier(agentAdapter, options.routerSessionId ?? '');
+  const routerIdentity = new RouterIdentity(db, options.routerSessionId ?? '', async (sessionId, workspaceId) => {
+    const workspace = await workspaceAdapter.getWorkspace(workspaceId);
+    return workspace?.sessionIds.includes(sessionId) ?? false;
+  });
+  const notifier = new SessionDirectNotifier(agentAdapter, () => routerIdentity.ownerSessionId());
 
   return {
     db,
@@ -64,6 +70,7 @@ export async function createStack(ctx: Context, options: { dataDir?: string; rou
     sessionAdapter,
     monitor,
     notifier,
+    routerIdentity,
   };
 }
 

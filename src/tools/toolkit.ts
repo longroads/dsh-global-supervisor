@@ -13,8 +13,8 @@ export interface ToolCallContext {
 /** 业务处理器（身份已校验通过）。 */
 export type ToolHandler = (args: unknown, ctx: ToolCallContext) => Promise<unknown> | unknown;
 
-/** 执行期权限守卫（第二防线；false 时返回结构化拒绝值）。 */
-export type AccessGuard = (callerSessionId: string) => boolean;
+/** 执行期权限守卫（第二防线；false 时返回结构化拒绝值。workspace 级判定需异步，支持 Promise）。 */
+export type AccessGuard = (callerSessionId: string) => boolean | Promise<boolean>;
 
 /** 拒绝返回的稳定结构（模型可读、程序可判别）。 */
 export interface GuardDenied {
@@ -46,7 +46,7 @@ export function makeTool(input: {
     },
     async execute(args, exec) {
       const caller = exec.agent?.id;
-      if (!caller || !input.guard(caller)) {
+      if (!caller || !(await input.guard(caller))) {
         return { error: 'forbidden', message: input.guardDeniedMessage } satisfies GuardDenied;
       }
       return input.handler(args, { callerSessionId: caller });

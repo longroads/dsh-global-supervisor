@@ -120,8 +120,9 @@ export function apply(ctx: Context, config: PluginConfig): void {
     void writeLoadMarker('probe-disabled', { note: 'config.probe=false——若期望探针运行，请检查 patch 配置' });
   }
 
-  // 业务模式：Router 会话配置就绪时组装服务栈并注册 16 个工具（方案 §7 的 15 个 + adopt 纳管既有 workspace）
-  if (config.routerSessionId.trim() !== '') {
+  // 业务模式：Router 身份可经 patch 预置或运行时认领（supervisor_claim_router），
+  // 均非必需——无预置时栈照常启动，等待任意会话首次认领
+  {
     void (async () => {
       try {
         const { awaitService } = await import('./adapters/host-services.js');
@@ -137,7 +138,7 @@ export function apply(ctx: Context, config: PluginConfig): void {
         stack.monitor.start();
         const { buildSupervisorTools } = await import('./tools/supervisor-tools.js');
         const { buildWorkerReportTool } = await import('./tools/worker-report-tool.js');
-        const all = [...buildSupervisorTools(stack, config.routerSessionId), buildWorkerReportTool(stack)];
+        const all = [...buildSupervisorTools(stack), buildWorkerReportTool(stack)];
         for (const tool of all) {
           tools.register(tool);
         }
