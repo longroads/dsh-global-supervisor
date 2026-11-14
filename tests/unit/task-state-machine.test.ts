@@ -8,7 +8,7 @@ const ALL: TaskStatus[] = ['pending', 'queued', 'running', 'completed', 'blocked
 const EXPECTED: Record<TaskStatus, TaskStatus[]> = {
   pending: ['queued', 'canceled'],
   queued: ['running', 'canceled'],
-  running: ['completed', 'blocked', 'need_human', 'failed'],
+  running: ['completed', 'blocked', 'need_human', 'failed', 'canceled'],
   blocked: ['queued', 'canceled'],
   need_human: ['queued', 'canceled'],
   failed: ['queued', 'canceled'],

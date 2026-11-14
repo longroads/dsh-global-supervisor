@@ -8,7 +8,7 @@ import type { TaskStatus } from '../types/index.js';
 const ALLOWED_TRANSITIONS: Record<TaskStatus, readonly TaskStatus[]> = {
   pending: ['queued', 'canceled'],
   queued: ['running', 'canceled'],
-  running: ['completed', 'blocked', 'need_human', 'failed'],
+  running: ['completed', 'blocked', 'need_human', 'failed', 'canceled'],
   blocked: ['queued', 'canceled'],
   need_human: ['queued', 'canceled'],
   failed: ['queued', 'canceled'],
