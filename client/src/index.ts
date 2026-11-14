@@ -116,9 +116,13 @@ function SupervisorPanel(): unknown {
 
 /** client 入口：注册全局监督设置面板（slots 就绪后经 inject 回调注册——宿主范式）。 */
 export function apply(ctx: ClientContext): void {
-  // 加载探针：上报 client 执行状态（诊断链路；在任何 slots 访问前发出，避免门禁异常吞掉上报）
-  let registered = false;
-  let registerReturn = 'pending';
+  const report = (phase: string, extra: Record<string, unknown>): void => {
+    void fetch(api('global-supervisor/client-ping'), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ phase, ...extra }),
+    }).catch(() => undefined);
+  };
   try {
     ctx.slots.inject('settings.section', () => {
       try {
@@ -131,24 +135,15 @@ export function apply(ctx: ClientContext): void {
           },
           () => h(SupervisorPanel),
         );
-        registered = true;
-        registerReturn = typeof off === 'function' ? 'disposer' : String(off);
+        report('registered', { registered: true, disposer: typeof off === 'function' });
       } catch (e) {
-        registerReturn = `throw:${String(e)}`;
+        report('register-failed', { error: String(e) });
       }
     });
-    registerReturn = 'injected';
+    report('apply', { registered: false });
   } catch (e) {
-    registerReturn = `outer-throw:${String(e)}`;
+    report('apply-failed', { error: String(e) });
   }
-  const report = (): void => {
-    void fetch(api('global-supervisor/client-ping'), {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ phase: 'apply', registered, registerReturn }),
-    }).catch(() => undefined);
-  };
-  report();
   if (typeof ctx.effect === 'function') {
     ctx.effect(() => undefined, 'global-supervisor: settings section');
   }

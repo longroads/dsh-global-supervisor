@@ -130,8 +130,13 @@ function SupervisorPanel() {
   );
 }
 function apply(ctx) {
-  let registered = false;
-  let registerReturn = "pending";
+  const report = (phase, extra) => {
+    void fetch(api("global-supervisor/client-ping"), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ phase, ...extra })
+    }).catch(() => void 0);
+  };
   try {
     ctx.slots.inject("settings.section", () => {
       try {
@@ -144,24 +149,15 @@ function apply(ctx) {
           },
           () => (0, import_react.createElement)(SupervisorPanel)
         );
-        registered = true;
-        registerReturn = typeof off === "function" ? "disposer" : String(off);
+        report("registered", { registered: true, disposer: typeof off === "function" });
       } catch (e) {
-        registerReturn = `throw:${String(e)}`;
+        report("register-failed", { error: String(e) });
       }
     });
-    registerReturn = "injected";
+    report("apply", { registered: false });
   } catch (e) {
-    registerReturn = `outer-throw:${String(e)}`;
+    report("apply-failed", { error: String(e) });
   }
-  const report = () => {
-    void fetch(api("global-supervisor/client-ping"), {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ phase: "apply", registered, registerReturn })
-    }).catch(() => void 0);
-  };
-  report();
   if (typeof ctx.effect === "function") {
     ctx.effect(() => void 0, "global-supervisor: settings section");
   }
