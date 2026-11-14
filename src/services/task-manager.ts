@@ -232,6 +232,37 @@ export class TaskManager {
     return this.tasks.byId(taskId) as TaskRow;
   }
 
+  /** Host 重启后存疑恢复的结果（机器消费值）。 */
+  recoverFromRestart(): { pendingIds: string[]; expiredIds: string[] } {
+    const nowIso = new Date().toISOString();
+    const pendingIds: string[] = [];
+    const expiredIds: string[] = [];
+    for (const task of this.tasks.list({ status: 'running' })) {
+      const expired = task.timeout_at !== null && task.timeout_at < nowIso;
+      if (expired) {
+        withTransaction(this.db, () => {
+          this.tasks.updateStatus(task.id, 'failed');
+          const openRun = this.runs.byTask(task.id).find((r) => r.ended_at === null);
+          if (openRun) {
+            this.runs.finish(openRun.id, 'timeout', { errorMessage: 'Host 重启时任务超时窗口已过' });
+          }
+          this.audit.log({ actorRole: 'system', action: 'task.restart-expired', targetType: 'task', targetId: task.id });
+        });
+        expiredIds.push(task.id);
+      } else {
+        pendingIds.push(task.id);
+      }
+      this.events.ingest({
+        eventId: `restart-recovery:${nowIso}:${task.id}`,
+        source: 'internal',
+        type: 'task.restart-recovery',
+        taskId: task.id,
+        payloadJson: JSON.stringify({ expired }),
+      });
+    }
+    return { pendingIds, expiredIds };
+  }
+
   private requireTask(taskId: string): TaskRow {
     const task = this.tasks.byId(taskId);
     if (!task) {
