@@ -6,10 +6,9 @@
  * - 结果四态：VERIFIED / UNAVAILABLE / UNSTABLE / SKIPPED；
  * - 报告 JSON 落盘到插件数据目录，供 docs/API_COMPATIBILITY.md 汇总；
  * - 探针只读探测，不创建 Workspace / Session / Schedule 等业务对象。
+ * - 模块顶层零 node:* 静态依赖（宿主插件环境可能限制 Node 内建模块的解析，
+ *   全部内建改为使用点动态 import，保证本模块本身可被任何环境加载）。
  */
-import { mkdir, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
-import { homedir } from 'node:os';
 import type { Context } from '@deepseek-ai/cordis';
 // 以下 side-effect 类型导入用于合并 Context 上的服务声明（workspaceRegistry / agents / schedule / sessionPersistence / tools）
 import type {} from '@deepseek-ai/dsh-workspace';
@@ -56,6 +55,8 @@ async function resolveDataDir(configured?: string): Promise<{ dir: string; basis
     const dir = mod.dshHomePath('global-supervisor');
     return { dir, basis: `dsh-home-paths（home=${mod.resolveDshHome()}）` };
   } catch (error) {
+    const { homedir } = await import('node:os');
+    const { join } = await import('node:path');
     const fallback = join(homedir(), '.dsh', 'global-supervisor');
     const reason = error instanceof Error ? error.message : String(error);
     return { dir: fallback, basis: `降级 ~/.dsh（dsh-home-paths 不可用：${reason}）` };
@@ -81,6 +82,7 @@ export async function runProbe(ctx: Context, configuredDir?: string): Promise<Pr
   }));
 
   checks.push(await check('env.data-dir', '插件数据目录解析（V6）', async () => {
+    const { mkdir } = await import('node:fs/promises');
     await mkdir(data.dir, { recursive: true });
     return `${data.dir}（依据：${data.basis}）`;
   }));
@@ -166,6 +168,8 @@ export async function runProbe(ctx: Context, configuredDir?: string): Promise<Pr
   };
 
   // 落盘报告（探针自身的持久化验证）
+  const { mkdir, writeFile } = await import('node:fs/promises');
+  const { join } = await import('node:path');
   const reportPath = join(data.dir, 'probe-report.json');
   await mkdir(data.dir, { recursive: true });
   await writeFile(reportPath, `${JSON.stringify(report, null, 2)}\n`, 'utf8');
@@ -173,10 +177,3 @@ export async function runProbe(ctx: Context, configuredDir?: string): Promise<Pr
   return report;
 }
 
-/** 最近的 probe_echo 调用捕获（V1 复核证据）。 */
-export let lastToolInvocation: { agentId: string; args: unknown; at: string } | undefined;
-
-/** 记录一次 probe_echo 调用（由工具 execute 回调写入）。 */
-export function captureToolInvocation(agentId: string | undefined, args: unknown): void {
-  lastToolInvocation = { agentId: agentId ?? '(exec.agent 缺失)', args, at: new Date().toISOString() };
-}

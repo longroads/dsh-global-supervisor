@@ -14,7 +14,14 @@ import type {} from '@deepseek-ai/dsh-agent';
 import type {} from '@deepseek-ai/dsh-schedule';
 import type {} from '@deepseek-ai/dsh-session-persistence';
 import type {} from '@deepseek-ai/dsh-tools';
-import { captureToolInvocation, runProbe } from './probe.js';
+
+/** 最近的 probe_echo 调用捕获（V1 复核证据；纯内存态）。 */
+let lastToolInvocation: { agentId: string; args: unknown; at: string } | undefined;
+
+/** 记录一次 probe_echo 调用（由工具 execute 回调写入）。 */
+function captureToolInvocation(agentId: string | undefined, args: unknown): void {
+  lastToolInvocation = { agentId: agentId ?? '(exec.agent 缺失)', args, at: new Date().toISOString() };
+}
 
 /** 插件配置（结构定义；schema 声明见下方 Config，profile 的 cordis.patch.yml 可覆盖）。 */
 interface PluginConfig {
@@ -51,11 +58,6 @@ const probeEchoTool: ToolDefinition = {
 };
 
 /**
- * 插件应用入口。
- * @param ctx - Cordis 上下文（宿主为 DSH Desktop 0.2.2-rc.x Host 进程）
- * @param config - 已验证配置
- */
-/**
  * 启动标记：把插件启动痕迹直接写入文件系统（绕过可能不可见的 ctx.logger），
  * 用于区分"插件未进加载树"与"加载后内部失败"两类问题。
  */
@@ -72,6 +74,11 @@ async function writeLoadMarker(stage: string, detail: unknown): Promise<void> {
   }
 }
 
+/**
+ * 插件应用入口。
+ * @param ctx - Cordis 上下文（宿主为 DSH Desktop 0.2.2-rc.x Host 进程）
+ * @param config - 已验证配置
+ */
 export function apply(ctx: Context, config: PluginConfig): void {
   void writeLoadMarker('apply-enter', { probe: config.probe, dataDir: config.dataDir });
   ctx.logger.info(`dsh-global-supervisor 加载（probe=${String(config.probe)}）`);
@@ -86,10 +93,11 @@ export function apply(ctx: Context, config: PluginConfig): void {
     }
   }
 
-  // 启动探针（probe 模式）
+  // 启动探针（probe 模式；动态加载 probe 模块，保持本模块顶层零 node:* 依赖）
   if (config.probe) {
     void (async () => {
       try {
+        const { runProbe } = await import('./probe.js');
         const report = await runProbe(ctx, config.dataDir);
         const verified = report.checks.filter((c) => c.status === 'VERIFIED').length;
         const failed = report.checks.filter((c) => c.status !== 'VERIFIED');
