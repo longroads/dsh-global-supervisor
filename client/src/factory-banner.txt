@@ -1,0 +1,3 @@
+window.__ModuleLoader__.load({ id: "dsh-global-supervisor", factory: (require) => {
+		var module = { exports: {} };
+		var exports = module.exports;
