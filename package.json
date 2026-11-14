@@ -1,6 +1,6 @@
 {
   "name": "dsh-global-supervisor",
-  "version": "0.1.0-beta.1",
+  "version": "0.1.0-beta.2",
   "description": "DSH 全局监督插件：跨 Workspace 的项目管理、任务分派、状态监控、定时巡检与事件响应。不修改 DSH 核心源码，业务状态 SQLite 持久化，Worker 结构化汇报。",
   "type": "module",
   "main": "dist/index.js",
