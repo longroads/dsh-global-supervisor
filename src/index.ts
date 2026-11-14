@@ -1,10 +1,10 @@
 /**
  * dsh-global-supervisor 插件入口。
  *
- * 当前阶段：S1 API 探针 + S2 工程骨架。
- * 刻意不声明 Cordis inject 服务清单：探针阶段以运行时探测代替静态声明，
- * 服务缺失会在 probe 报告中以 UNAVAILABLE 显式呈现（而非加载失败）。
- * 业务实现阶段（S3+）将按 VERIFIED 结论补齐 inject。
+ * 两种运行形态（可并存）：
+ * - probe 模式：启动自检，报告写入数据目录（开发期诊断）；
+ * - 业务模式：routerSessionId 配置非空时组装服务栈并注册 15 个工具。
+ * 沙箱纪律：顶层零 node:* 静态依赖；服务访问一律 ctx.get（docs/API_COMPATIBILITY.md）。
  */
 import type { Context } from '@deepseek-ai/cordis';
 import z from '@deepseek-ai/schemastery';
@@ -27,12 +27,16 @@ function captureToolInvocation(agentId: string | undefined, args: unknown): void
 interface PluginConfig {
   probe: boolean;
   dataDir: string;
+  routerWorkspaceId: string;
+  routerSessionId: string;
 }
 
 /** 插件配置 schema（schemastery，DSH 插件惯例）。 */
 export const Config = z.object({
   probe: z.boolean().default(false).description('开发期 API 探针：启动时运行兼容性自检，报告写入数据目录'),
   dataDir: z.string().default('').description('插件数据目录（默认经 dsh-home-paths 解析为 ~/.dsh/global-supervisor）'),
+  routerWorkspaceId: z.string().default('').description('Router 所属 DSH workspace ID（super-space01）'),
+  routerSessionId: z.string().default('').description('Router 固定会话 ID（supervisor_* 工具的唯一授权调用方；留空则不启用业务工具）'),
 });
 
 /** Cordis 插件名（profile bundles / patch 的定位标识）。 */
@@ -114,5 +118,28 @@ export function apply(ctx: Context, config: PluginConfig): void {
     })();
   } else {
     void writeLoadMarker('probe-disabled', { note: 'config.probe=false——若期望探针运行，请检查 patch 配置' });
+  }
+
+  // 业务模式：Router 会话配置就绪时组装服务栈并注册 15 个工具
+  if (config.routerSessionId.trim() !== '') {
+    void (async () => {
+      try {
+        const { awaitService } = await import('./adapters/host-services.js');
+        const tools = await awaitService<{ register: (tool: ToolDefinition) => unknown }>(ctx, 'tools');
+        const { createStack } = await import('./runtime.js');
+        const stack = await createStack(ctx, { dataDir: config.dataDir });
+        const { buildSupervisorTools } = await import('./tools/supervisor-tools.js');
+        const { buildWorkerReportTool } = await import('./tools/worker-report-tool.js');
+        const all = [...buildSupervisorTools(stack, config.routerSessionId), buildWorkerReportTool(stack)];
+        for (const tool of all) {
+          tools.register(tool);
+        }
+        void writeLoadMarker('stack-ready', { tools: all.length, dataDir: stack.dataDir, router: config.routerSessionId });
+        ctx.logger.info(`dsh-global-supervisor 服务栈就绪：${all.length} 个工具已注册`);
+      } catch (error) {
+        void writeLoadMarker('stack-failed', { message: error instanceof Error ? error.stack ?? error.message : String(error) });
+        ctx.logger.error(`服务栈初始化失败：${error instanceof Error ? error.stack ?? error.message : String(error)}`);
+      }
+    })();
   }
 }
