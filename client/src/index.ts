@@ -113,27 +113,47 @@ function SupervisorPanel(): unknown {
 
 /** client 入口：注册全局监督设置面板（slots 服务缺失时降级为不注册）。 */
 export function apply(ctx: ClientContext): void {
-  // 加载探针：向 host 上报 client bundle 已被执行（诊断 client 发现链路）
+  // 加载探针：上报 client 执行状态与 slots 可用性（诊断设置卡片缺失）
   try {
-    void fetch(api('global-supervisor/client-ping'), { method: 'POST' }).catch(() => undefined);
-  } catch {
-    // fetch 不可用时静默（非浏览器环境）
-  }
-  if (!ctx.slots || typeof ctx.slots.register !== 'function') {
-    console.warn('[global-supervisor] host slots 服务不可用——设置面板未注册');
-    return;
-  }
-  const dispose = ctx.slots.register(
-    {
-      name: 'settings.section',
-      id: 'global-supervisor',
-      order: 60,
-      label: () => '全局监督',
-    },
-    () => h(SupervisorPanel),
-  );
-  ctx.slots.inject('settings.section', () => undefined);
-  if (typeof ctx.effect === 'function') {
-    ctx.effect(() => (typeof dispose === 'function' ? dispose() : undefined), 'global-supervisor: settings section');
+    const slotsType = ctx.slots === undefined ? 'undefined' : typeof ctx.slots;
+    const hasRegister = !!ctx.slots && typeof ctx.slots.register === 'function';
+    let registered = false;
+    let registerReturn = 'none';
+    try {
+      if (hasRegister) {
+        const off = ctx.slots.register(
+          {
+            name: 'settings.section',
+            id: 'global-supervisor',
+            order: 60,
+            label: () => '全局监督',
+          },
+          () => h(SupervisorPanel),
+        );
+        registered = true;
+        registerReturn = typeof off === 'function' ? 'disposer' : String(off);
+      }
+    } catch (e) {
+      registerReturn = `throw:${String(e)}`;
+    }
+    void fetch(api('global-supervisor/client-ping'), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ slotsType, hasRegister, registered, registerReturn }),
+    }).catch(() => undefined);
+    if (!hasRegister) {
+      console.warn('[global-supervisor] host slots 服务不可用——设置面板未注册');
+      return;
+    }
+    if (!registered) {
+      console.warn('[global-supervisor] slots.register 未成功：', registerReturn);
+      return;
+    }
+    ctx.slots.inject('settings.section', () => undefined);
+    if (typeof ctx.effect === 'function') {
+      ctx.effect(() => undefined, 'global-supervisor: settings section');
+    }
+  } catch (outer) {
+    console.warn('[global-supervisor] apply 异常', outer);
   }
 }

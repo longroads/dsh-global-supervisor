@@ -51,12 +51,23 @@ export async function registerSettingsApi(ctx: Context, stack: SupervisorStack):
       res.setHeader('content-type', 'application/json; charset=utf-8');
       res.statusCode = 200;
       res.end('{"ok":true}');
+      let body = '';
+      try {
+        const chunks: Buffer[] = [];
+        await new Promise<void>((resolve) => {
+          req.on('data', (c?: Buffer) => { if (c) chunks.push(c); });
+          req.on('end', () => resolve());
+        });
+        body = Buffer.concat(chunks).toString('utf8').slice(0, 300);
+      } catch {
+        body = '';
+      }
       const { appendFile, mkdir } = await import('node:fs/promises');
       const os = await import('node:os');
       const path = await import('node:path');
       const file = path.join(os.homedir(), '.dsh', 'global-supervisor-load.log');
       await mkdir(path.dirname(file), { recursive: true }).catch(() => undefined);
-      await appendFile(file, `${new Date().toISOString()} [client-ping] ${JSON.stringify({ ua: req.headers['user-agent'] ?? '' })}\n`, 'utf8').catch(() => undefined);
+      await appendFile(file, `${new Date().toISOString()} [client-ping] ${body || '(no-body)'}\n`, 'utf8').catch(() => undefined);
     },
   });
 
