@@ -31,13 +31,20 @@ export function buildSupervisorTools(stack: SupervisorStack, routerSessionId: st
 
   tools.push(makeTool({
     name: 'supervisor_workspace_list',
-    description: '列出全部受管项目（DSH workspace 与业务状态联合视图；include_archived=true 包含归档）',
-    parameters: OBJ({ include_archived: { type: 'boolean', description: '是否包含归档项目' } }),
+    description: '列出全量工作区概览（每个 DSH workspace 一行并标注 managed 受管状态；未纳管的可用 supervisor_workspace_adopt 纳入管理）。include_archived=true 追含已归档项目',
+    parameters: OBJ({ include_archived: { type: 'boolean', description: '是否包含已归档项目' } }),
     resultSchema: RESULT,
     guard, guardDeniedMessage: DENIED,
     handler: async (args) => {
       const record = asRecord(args);
-      return { ok: true, projects: await stack.workspaceManager.listProjects(record['include_archived'] === true) };
+      const workspaces = await stack.workspaceManager.listWorkspaceOverview(record['include_archived'] === true);
+      return {
+        ok: true,
+        total: workspaces.length,
+        managed: workspaces.filter((w) => w.managed).length,
+        unmanaged: workspaces.filter((w) => !w.managed).length,
+        workspaces,
+      };
     },
   }));
 

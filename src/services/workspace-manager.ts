@@ -31,6 +31,20 @@ export interface ProjectView {
   nextReviewAt: string | null;
 }
 
+/** 全量工作区概览行（未纳管项 managed=false，其余字段为占位语义）。 */
+export interface WorkspaceOverviewItem {
+  managed: boolean;
+  projectId?: string;
+  workspaceId: string;
+  path: string;
+  title: string;
+  status: string;
+  health: ProjectHealth;
+  priority: number;
+  workerSessionId: string | null;
+  sessionCount: number;
+}
+
 /** 启动对账的漂移报告。 */
 export interface ReconcileReport {
   managedWorkspaces: number;
@@ -62,6 +76,27 @@ export class WorkspaceManager {
     const workspace = await this.adapter.getWorkspace(row.workspace_id);
     if (!workspace) return undefined;
     return this.toView(row, workspace);
+  }
+
+  /**
+   * 全量工作区概览（方案 §7："⨝ 项目状态的全量列表"——首屏视图）：
+   * 每个 DSH workspace 一行，标注受管状态；未纳管的 managed=false，供纳管决策。
+   */
+  async listWorkspaceOverview(includeArchived = false): Promise<WorkspaceOverviewItem[]> {
+    const workspaces = await this.adapter.listWorkspaces();
+    const rows = this.projects.list(includeArchived);
+    const byWorkspace = new Map(rows.map((row) => [row.workspace_id, row]));
+    const items: WorkspaceOverviewItem[] = [];
+    for (const workspace of workspaces) {
+      const row = byWorkspace.get(workspace.id);
+      if (row) {
+        const view = this.toView(row, workspace);
+        items.push({ managed: true, projectId: view.projectId, workspaceId: view.workspaceId, path: view.workspacePath, title: view.title, status: view.status, health: view.health, priority: view.priority, workerSessionId: view.workerSessionId, sessionCount: view.sessionCount });
+      } else {
+        items.push({ managed: false, workspaceId: workspace.id, path: workspace.path, title: workspace.title, status: 'unmanaged', health: 'unknown', priority: 0, workerSessionId: null, sessionCount: workspace.sessionIds.length });
+      }
+    }
+    return items;
   }
 
   /** 按 workspace 查项目（工具入参常用 workspaceId）。 */
