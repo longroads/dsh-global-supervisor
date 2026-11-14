@@ -136,6 +136,21 @@ export function apply(ctx: Context, config: PluginConfig): void {
           ctx.logger.info(`重启恢复：${recovery.pendingIds.length} 个任务存疑待汇报，${recovery.expiredIds.length} 个已判超时`);
         }
         stack.monitor.start();
+        // Schedule 对账（第八节：Host 任务与本地绑定双向核对；远端消失的绑定停用）
+        const scheduleReconcile = await stack.scheduler.reconcile();
+        if (scheduleReconcile.remoteMissing.length > 0) {
+          void writeLoadMarker('schedule-reconcile', scheduleReconcile);
+        }
+        // 事件源接入（§6.4 第一版）：Worker 汇报与 Agent 异常经统一事件入口留痕
+        ctx.on('agent/error', (payload: { agent: { id: string }; error: unknown }) => {
+          void stack.eventManager.ingest({
+            eventId: `agent-error:${payload.agent.id}:${Date.now()}`,
+            source: 'agent',
+            type: 'agent.error',
+            workspaceId: undefined,
+            payloadJson: JSON.stringify({ message: payload.error instanceof Error ? payload.error.message : String(payload.error) }),
+          });
+        });
         const { buildSupervisorTools } = await import('./tools/supervisor-tools.js');
         const { buildWorkerReportTool } = await import('./tools/worker-report-tool.js');
         const all = [...buildSupervisorTools(stack), buildWorkerReportTool(stack)];
