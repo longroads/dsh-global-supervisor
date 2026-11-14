@@ -55,12 +55,35 @@ const probeEchoTool: ToolDefinition = {
  * @param ctx - Cordis 上下文（宿主为 DSH Desktop 0.2.2-rc.x Host 进程）
  * @param config - 已验证配置
  */
+/**
+ * 启动标记：把插件启动痕迹直接写入文件系统（绕过可能不可见的 ctx.logger），
+ * 用于区分"插件未进加载树"与"加载后内部失败"两类问题。
+ */
+async function writeLoadMarker(stage: string, detail: unknown): Promise<void> {
+  try {
+    const fs = await import('node:fs/promises');
+    const os = await import('node:os');
+    const path = await import('node:path');
+    const file = path.join(os.homedir(), '.dsh', 'global-supervisor-load.log');
+    await fs.mkdir(path.dirname(file), { recursive: true });
+    await fs.appendFile(file, `${new Date().toISOString()} [${stage}] ${JSON.stringify(detail)}\n`, 'utf8');
+  } catch {
+    // 文件系统不可用时无通道可写——保持静默，由探针报告缺失间接暴露
+  }
+}
+
 export function apply(ctx: Context, config: PluginConfig): void {
+  void writeLoadMarker('apply-enter', { probe: config.probe, dataDir: config.dataDir });
   ctx.logger.info(`dsh-global-supervisor 加载（probe=${String(config.probe)}）`);
 
   // 探针工具注册：开发期验证工具执行上下文（V1）
   if (config.probe) {
-    ctx.tools?.register(probeEchoTool);
+    try {
+      ctx.tools?.register(probeEchoTool);
+      void writeLoadMarker('probe-echo-registered', {});
+    } catch (error) {
+      void writeLoadMarker('probe-echo-failed', { message: error instanceof Error ? error.message : String(error) });
+    }
   }
 
   // 启动探针（probe 模式）
@@ -70,13 +93,17 @@ export function apply(ctx: Context, config: PluginConfig): void {
         const report = await runProbe(ctx, config.dataDir);
         const verified = report.checks.filter((c) => c.status === 'VERIFIED').length;
         const failed = report.checks.filter((c) => c.status !== 'VERIFIED');
+        void writeLoadMarker('probe-done', { verified, total: report.checks.length, dataDir: report.dataDir });
         ctx.logger.info(`API 探针完成：${verified}/${report.checks.length} 项 VERIFIED，报告已写入 ${report.dataDir}`);
         for (const item of failed) {
           ctx.logger.warn(`  [${item.status}] ${item.id}：${item.detail}`);
         }
       } catch (error) {
+        void writeLoadMarker('probe-crashed', { message: error instanceof Error ? error.stack ?? error.message : String(error) });
         ctx.logger.error(`API 探针运行失败：${error instanceof Error ? error.stack ?? error.message : String(error)}`);
       }
     })();
+  } else {
+    void writeLoadMarker('probe-disabled', { note: 'config.probe=false——若期望探针运行，请检查 patch 配置' });
   }
 }
