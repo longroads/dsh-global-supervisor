@@ -102,6 +102,23 @@ export class AgentController {
     return this.queue.stats();
   }
 
+  /**
+   * 释放某任务的并发许可（看门狗判超时/重试路径调用）。
+   * 许可若不释放，Worker 沉默一次即令后续派发永久挂起——这是队列死锁的唯一来源。
+   */
+  releasePermit(taskId: string): boolean {
+    const permit = this.permits.get(taskId);
+    if (!permit) return false;
+    permit.release();
+    this.permits.delete(taskId);
+    return true;
+  }
+
+  /** 当前持有的许可数（诊断/测试）。 */
+  permitsCount(): number {
+    return this.permits.size;
+  }
+
   /** 组装任务指令文本（含 worker_report 汇报要求）。 */
   private buildInstruction(taskId: string, title: string, description: string): string {
     return [

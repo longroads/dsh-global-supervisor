@@ -52,7 +52,7 @@ export async function createStack(ctx: Context, options: { dataDir?: string; rou
   const workspaceManager = new WorkspaceManager(workspaceAdapter, db);
   const agentController = new AgentController(agentAdapter, taskManager, db);
   const scheduler = new SchedulerService(scheduleAdapter, db);
-  const monitor = new ProjectMonitor(taskManager);
+  const monitor = new ProjectMonitor(taskManager, agentController);
   const routerIdentity = new RouterIdentity(db, options.routerSessionId ?? '', async (sessionId, workspaceId) => {
     const workspace = await workspaceAdapter.getWorkspace(workspaceId);
     return workspace?.sessionIds.includes(sessionId) ?? false;

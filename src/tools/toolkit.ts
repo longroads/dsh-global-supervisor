@@ -35,6 +35,8 @@ export function makeTool(input: {
   guard: AccessGuard;
   guardDeniedMessage: string;
   handler: ToolHandler;
+  /** 协作式超时预算（毫秒）：声明即承诺工具会把 exec.signal 转发给实现。 */
+  timeoutMs?: number;
 }): ToolDefinition {
   return {
     name: input.name,
@@ -44,6 +46,7 @@ export function makeTool(input: {
       schema: input.resultSchema,
       render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }],
     },
+    ...(input.timeoutMs !== undefined ? { timeoutMs: input.timeoutMs } : {}),
     async execute(args, exec) {
       const caller = exec.agent?.id;
       if (!caller || !(await input.guard(caller))) {

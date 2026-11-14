@@ -5,6 +5,7 @@
  * 定时经全局 setInterval（沙箱 timer 服务需 inject 声明，第一版规避），
  * stop() 显式清理，插件卸载语义由宿主进程生命周期承担。
  */
+import type { AgentController } from './agent-controller.js';
 import type { TaskManager } from './task-manager.js';
 
 /** 单次扫描结果（机器消费值）。 */
@@ -12,6 +13,7 @@ export interface WatchdogScan {
   expired: string[];
   retried: string[];
   retryExhausted: string[];
+  permitsReleased: number;
 }
 
 /** 默认扫描间隔：5 分钟。 */
@@ -22,6 +24,7 @@ export class ProjectMonitor {
 
   constructor(
     private readonly taskManager: TaskManager,
+    private readonly agentController: AgentController,
     private readonly intervalMs = DEFAULT_INTERVAL_MS,
   ) {}
 
@@ -44,12 +47,16 @@ export class ProjectMonitor {
   /**
    * 扫描一次：超时任务判 failed/timeout；重试预算未尽的任务重排入队。
    * recoverFromRestart 即超时判定本体（超时窗口已过 → failed/timeout，幂等）。
+   * 重排前先释放该任务的并发许可——否则重排后的新派发将永久等待（许可泄漏即队列死锁）。
    */
   scanOnce(): WatchdogScan {
-    const result: WatchdogScan = { expired: [], retried: [], retryExhausted: [] };
+    const result: WatchdogScan = { expired: [], retried: [], retryExhausted: [], permitsReleased: 0 };
     const recovery = this.taskManager.recoverFromRestart();
     result.expired = recovery.expiredIds;
     for (const taskId of recovery.expiredIds) {
+      if (this.agentController.releasePermit(taskId)) {
+        result.permitsReleased += 1;
+      }
       try {
         this.taskManager.retry(taskId, { role: 'system' });
         result.retried.push(taskId);

@@ -77,6 +77,28 @@ describe('makeTool 权限中间件', () => {
     await tool.execute({}, execOf('session-x'));
     expect(seen).toBe('session-x');
   });
+
+  it('timeoutMs 透传到工具定义（长耗时工具的协作式超时预算）', () => {
+    const tool = makeTool({
+      name: 't', description: 'd',
+      parameters: { type: 'object', properties: {} },
+      resultSchema: { type: 'object', properties: {} },
+      guard: () => true,
+      guardDeniedMessage: '',
+      timeoutMs: 30_000,
+      handler: () => ({ ok: true }),
+    });
+    expect(tool.timeoutMs).toBe(30_000);
+    const withoutBudget = makeTool({
+      name: 't2', description: 'd',
+      parameters: { type: 'object', properties: {} },
+      resultSchema: { type: 'object', properties: {} },
+      guard: () => true,
+      guardDeniedMessage: '',
+      handler: () => ({ ok: true }),
+    });
+    expect(withoutBudget.timeoutMs).toBeUndefined();
+  });
 });
 
 describe('supervisor 工具权限与任务流', () => {

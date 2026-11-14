@@ -194,6 +194,7 @@ export function buildSupervisorTools(stack: SupervisorStack): ToolDefinition[] {
     parameters: OBJ({ task_id: { type: 'string' } }, ['task_id']),
     resultSchema: RESULT,
     guard, guardDeniedMessage: DENIED,
+    timeoutMs: 120_000,
     handler: async (args, ctx) => {
       const taskId = stringArg(asRecord(args), 'task_id');
       try {
@@ -212,6 +213,7 @@ export function buildSupervisorTools(stack: SupervisorStack): ToolDefinition[] {
     parameters: OBJ({ task_id: { type: 'string' }, reason: { type: 'string' } }, ['task_id']),
     resultSchema: RESULT,
     guard, guardDeniedMessage: DENIED,
+    timeoutMs: 30_000,
     handler: async (args, ctx) => {
       const record = asRecord(args);
       const taskId = stringArg(record, 'task_id');
@@ -249,6 +251,7 @@ export function buildSupervisorTools(stack: SupervisorStack): ToolDefinition[] {
     parameters: OBJ({ workspace_id: { type: 'string' }, focus: { type: 'string', description: '巡检关注点（可选）' } }, ['workspace_id']),
     resultSchema: RESULT,
     guard, guardDeniedMessage: DENIED,
+    timeoutMs: 120_000,
     handler: (args, ctx) => reviewProject(stack, asRecord(args), ctx.callerSessionId, routerActor()),
   }));
 
@@ -258,6 +261,7 @@ export function buildSupervisorTools(stack: SupervisorStack): ToolDefinition[] {
     parameters: OBJ({ focus: { type: 'string', description: '巡检关注点（可选）' } }),
     resultSchema: RESULT,
     guard, guardDeniedMessage: DENIED,
+    timeoutMs: 120_000,
     handler: async (args, ctx) => {
       const record = asRecord(args);
       const projects = await stack.workspaceManager.listProjects();
@@ -284,6 +288,7 @@ export function buildSupervisorTools(stack: SupervisorStack): ToolDefinition[] {
     }, ['title', 'prompt', 'timing']),
     resultSchema: RESULT,
     guard, guardDeniedMessage: DENIED,
+    timeoutMs: 30_000,
     handler: async (args) => {
       const record = asRecord(args);
       const timing = record['timing'];
