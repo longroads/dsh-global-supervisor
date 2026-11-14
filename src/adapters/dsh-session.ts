@@ -53,7 +53,7 @@ export class DshSessionAdapter {
 
   /**
    * 批量读取会话标题（与 DSH 侧边栏显示的会话名同源：log-backed session/title 折叠）。
-   * 服务不可用或读取失败时返回空 Map——调用方降级到派生标签。
+   * 服务不可用或读取失败时返回空 Map——调用方降级到派生标签；失败原因写入诊断日志。
    */
   async readTitles(sessionIds: readonly string[]): Promise<Map<string, string>> {
     if (sessionIds.length === 0) return new Map();
@@ -67,9 +67,28 @@ export class DshSessionAdapter {
           titles.set(String(item.sessionId), title.trim());
         }
       }
+      this.logTitleDiagnostic(sessionIds, titles);
       return titles;
-    } catch {
+    } catch (error) {
+      this.logTitleDiagnostic(sessionIds, new Map(), error);
       return new Map();
+    }
+  }
+
+  /** 标题读取诊断：写入 marker（排障用；单行追加，页面打开一次一条）。 */
+  private async logTitleDiagnostic(requested: readonly string[], obtained: Map<string, string>, error?: unknown): Promise<void> {
+    try {
+      const { appendFile, mkdir } = await import('node:fs/promises');
+      const os = await import('node:os');
+      const path = await import('node:path');
+      const file = path.join(os.homedir(), '.dsh', 'global-supervisor-load.log');
+      await mkdir(path.dirname(file), { recursive: true }).catch(() => undefined);
+      const detail = error !== undefined
+        ? `error:${error instanceof Error ? error.message : String(error)}`
+        : `ok:${obtained.size}/${requested.length}`;
+      await appendFile(file, `${new Date().toISOString()} [title-lookup] ${detail}\n`, 'utf8').catch(() => undefined);
+    } catch {
+      // 诊断自身失败不阻断主流程
     }
   }
 }
