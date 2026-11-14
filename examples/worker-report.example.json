@@ -1,0 +1,10 @@
+{
+  "workspace_id": "project-a",
+  "task_id": "task-20261114-001",
+  "status": "running",
+  "progress": 65,
+  "summary": "当前工作进展",
+  "blockers": [],
+  "need_human": false,
+  "suggested_actions": []
+}
