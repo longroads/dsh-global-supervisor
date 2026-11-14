@@ -7,16 +7,16 @@ import { parseWorkerReport } from '../../src/protocols/worker-report.js';
 const ROUTER = { sessionId: 'session-router', role: 'router' as const };
 const WORKER = 'session-worker-a';
 
-function setup(): { manager: TaskManager; db: ReturnType<typeof openDatabase> } {
-  const db = openDatabase(':memory:');
+async function setup(): Promise<{ manager: TaskManager; db: Awaited<ReturnType<typeof openDatabase>> }> {
+  const db = await openDatabase(':memory:');
   const manager = new TaskManager(db);
   manager.projects.create({ id: 'proj-1', workspaceId: 'ws-1', name: 'P1', workerSessionId: WORKER });
   return { manager, db };
 }
 
-describe('TaskManager 任务生命周期', () => {
-  it('创建 → 入队 → 派发 → 汇报完成 全链路', () => {
-    const { manager, db } = setup();
+describe('TaskManager 任务生命周期', async () => {
+  it('创建 → 入队 → 派发 → 汇报完成 全链路', async () => {
+    const { manager, db } = await setup();
     const task = manager.createTask({ projectId: 'proj-1', title: '调研 X' }, ROUTER);
     expect(task.id).toMatch(/^task-\d{8}-\d{3}$/);
     expect(task.status).toBe('pending');
@@ -41,8 +41,8 @@ describe('TaskManager 任务生命周期', () => {
     db.close();
   });
 
-  it('心跳汇报不转移状态，仅刷新汇报时间', () => {
-    const { manager, db } = setup();
+  it('心跳汇报不转移状态，仅刷新汇报时间', async () => {
+    const { manager, db } = await setup();
     const task = manager.createTask({ projectId: 'proj-1', title: 'T' }, ROUTER);
     manager.enqueue(task.id, ROUTER);
     manager.markDispatched(task.id, WORKER, null);
@@ -56,8 +56,8 @@ describe('TaskManager 任务生命周期', () => {
     db.close();
   });
 
-  it('非派发会话汇报被拒（wrong-session）并留审计', () => {
-    const { manager, db } = setup();
+  it('非派发会话汇报被拒（wrong-session）并留审计', async () => {
+    const { manager, db } = await setup();
     const task = manager.createTask({ projectId: 'proj-1', title: 'T' }, ROUTER);
     manager.enqueue(task.id, ROUTER);
     manager.markDispatched(task.id, WORKER, null);
@@ -72,8 +72,8 @@ describe('TaskManager 任务生命周期', () => {
     db.close();
   });
 
-  it('任务不存在与状态不符的汇报结果', () => {
-    const { manager, db } = setup();
+  it('任务不存在与状态不符的汇报结果', async () => {
+    const { manager, db } = await setup();
     expect(manager.applyWorkerReport(
       parseWorkerReport({ workspace_id: 'ws-1', task_id: 'task-missing', status: 'completed' }),
       WORKER,
@@ -95,8 +95,8 @@ describe('TaskManager 任务生命周期', () => {
     db.close();
   });
 
-  it('blocked 汇报联动项目健康度', () => {
-    const { manager, db } = setup();
+  it('blocked 汇报联动项目健康度', async () => {
+    const { manager, db } = await setup();
     const task = manager.createTask({ projectId: 'proj-1', title: 'T' }, ROUTER);
     manager.enqueue(task.id, ROUTER);
     manager.markDispatched(task.id, WORKER, null);
@@ -109,8 +109,8 @@ describe('TaskManager 任务生命周期', () => {
     db.close();
   });
 
-  it('失败重试与重试耗尽', () => {
-    const { manager, db } = setup();
+  it('失败重试与重试耗尽', async () => {
+    const { manager, db } = await setup();
     const task = manager.createTask({ projectId: 'proj-1', title: 'T', maxRetries: 1 }, ROUTER);
     manager.enqueue(task.id, ROUTER);
     manager.markDispatched(task.id, WORKER, null);
@@ -136,8 +136,8 @@ describe('TaskManager 任务生命周期', () => {
     db.close();
   });
 
-  it('取消：running → canceled，执行记录以 canceled 收尾；终态再取消抛状态机错误', () => {
-    const { manager, db } = setup();
+  it('取消：running → canceled，执行记录以 canceled 收尾；终态再取消抛状态机错误', async () => {
+    const { manager, db } = await setup();
     const task = manager.createTask({ projectId: 'proj-1', title: 'T' }, ROUTER);
     manager.enqueue(task.id, ROUTER);
     manager.markDispatched(task.id, WORKER, null);
@@ -148,8 +148,8 @@ describe('TaskManager 任务生命周期', () => {
     db.close();
   });
 
-  it('依赖未完成禁止入队，完成后放行', () => {
-    const { manager, db } = setup();
+  it('依赖未完成禁止入队，完成后放行', async () => {
+    const { manager, db } = await setup();
     const first = manager.createTask({ projectId: 'proj-1', title: '前置' }, ROUTER);
     const second = manager.createTask({ projectId: 'proj-1', title: '后继', dependsOn: [first.id] }, ROUTER);
     expect(() => manager.enqueue(second.id, ROUTER)).toThrow(TaskManagerError);
@@ -164,8 +164,8 @@ describe('TaskManager 任务生命周期', () => {
     db.close();
   });
 
-  it('依赖含父任务时抛环路错误', () => {
-    const { manager, db } = setup();
+  it('依赖含父任务时抛环路错误', async () => {
+    const { manager, db } = await setup();
     const parent = manager.createTask({ projectId: 'proj-1', title: '父' }, ROUTER);
     expect(() =>
       manager.createTask({ projectId: 'proj-1', title: '子', parentTaskId: parent.id, dependsOn: [parent.id] }, ROUTER),

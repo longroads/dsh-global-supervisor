@@ -14,8 +14,8 @@ function futureIso(): string {
   return new Date(Date.now() + 30 * 60_000).toISOString();
 }
 
-function setup(): { manager: TaskManager; db: ReturnType<typeof openDatabase> } {
-  const db = openDatabase(':memory:');
+async function setup(): Promise<{ manager: TaskManager; db: Awaited<ReturnType<typeof openDatabase>> }> {
+  const db = await openDatabase(':memory:');
   const manager = new TaskManager(db);
   manager.projects.create({ id: 'proj-1', workspaceId: 'ws-1', name: 'P1', workerSessionId: WORKER });
   return { manager, db };
@@ -29,9 +29,9 @@ function runningTask(manager: TaskManager, timeoutAt: string | null): string {
   return task.id;
 }
 
-describe('Host 重启存疑恢复', () => {
-  it('超时窗口已过的任务判 failed/timeout，未过的保持 running', () => {
-    const { manager, db } = setup();
+describe('Host 重启存疑恢复', async () => {
+  it('超时窗口已过的任务判 failed/timeout，未过的保持 running', async () => {
+    const { manager, db } = await setup();
     const expiredId = runningTask(manager, pastIso());
     const aliveId = runningTask(manager, futureIso());
     const noDeadlineId = runningTask(manager, null);
@@ -47,8 +47,8 @@ describe('Host 重启存疑恢复', () => {
     db.close();
   });
 
-  it('每个任务写入一条 restart-recovery 事件（可审计）', () => {
-    const { manager, db } = setup();
+  it('每个任务写入一条 restart-recovery 事件（可审计）', async () => {
+    const { manager, db } = await setup();
     const expiredId = runningTask(manager, pastIso());
     const aliveId = runningTask(manager, futureIso());
     manager.recoverFromRestart();
@@ -58,8 +58,8 @@ describe('Host 重启存疑恢复', () => {
     db.close();
   });
 
-  it('恢复后未过期任务仍可正常接受汇报（存疑语义闭环）', () => {
-    const { manager, db } = setup();
+  it('恢复后未过期任务仍可正常接受汇报（存疑语义闭环）', async () => {
+    const { manager, db } = await setup();
     const aliveId = runningTask(manager, futureIso());
     manager.recoverFromRestart();
     const outcome = manager.applyWorkerReport(
@@ -70,8 +70,8 @@ describe('Host 重启存疑恢复', () => {
     db.close();
   });
 
-  it('重复调用幂等：已判死的任务不再重复处理', () => {
-    const { manager, db } = setup();
+  it('重复调用幂等：已判死的任务不再重复处理', async () => {
+    const { manager, db } = await setup();
     const expiredId = runningTask(manager, pastIso());
     manager.recoverFromRestart();
     const second = manager.recoverFromRestart();

@@ -10,42 +10,42 @@ import { TaskRunRepository } from '../../src/database/repository/task-run-reposi
 
 let tmpDir: string;
 
-beforeEach(() => {
+beforeEach(async () => {
   tmpDir = mkdtempSync(join(tmpdir(), 'dsh-sup-test-'));
 });
 
-afterEach(() => {
+afterEach(async () => {
   rmSync(tmpDir, { recursive: true, force: true });
 });
 
-describe('数据库连接与迁移', () => {
-  it(':memory: 打开即迁移到版本 1', () => {
-    const db = openDatabase(':memory:');
+describe('数据库连接与迁移', async () => {
+  it(':memory: 打开即迁移到版本 1', async () => {
+    const db = await openDatabase(':memory:');
     const row = db.prepare('SELECT MAX(version) AS v FROM schema_version').get() as { v: number };
     expect(row.v).toBe(1);
     db.close();
   });
 
-  it('文件库重复打开迁移幂等（schema_version 不重复累计）', () => {
+  it('文件库重复打开迁移幂等（schema_version 不重复累计）', async () => {
     const path = join(tmpDir, 'a.db');
-    const db1 = openDatabase(path);
+    const db1 = await openDatabase(path);
     db1.close();
-    const db2 = openDatabase(path);
+    const db2 = await openDatabase(path);
     const row = db2.prepare('SELECT COUNT(*) AS n, MAX(version) AS v FROM schema_version').get() as { n: number; v: number };
     expect(row.n).toBe(1);
     expect(row.v).toBe(1);
     db2.close();
   });
 
-  it('外键约束生效：无项目的任务插入被拒绝', () => {
-    const db = openDatabase(':memory:');
+  it('外键约束生效：无项目的任务插入被拒绝', async () => {
+    const db = await openDatabase(':memory:');
     const tasks = new TaskRepository(db);
     expect(() => tasks.create({ id: 'task-x', projectId: 'proj-missing', title: '孤儿任务' })).toThrow();
     db.close();
   });
 
-  it('withTransaction 中途抛错整体回滚', () => {
-    const db = openDatabase(':memory:');
+  it('withTransaction 中途抛错整体回滚', async () => {
+    const db = await openDatabase(':memory:');
     const projects = new ProjectRepository(db);
     projects.create({ id: 'proj-1', workspaceId: 'ws-1', name: 'P1' });
     expect(() =>
@@ -60,9 +60,9 @@ describe('数据库连接与迁移', () => {
   });
 });
 
-describe('ProjectRepository', () => {
-  it('创建/查询/更新/归档全链路', () => {
-    const db = openDatabase(':memory:');
+describe('ProjectRepository', async () => {
+  it('创建/查询/更新/归档全链路', async () => {
+    const db = await openDatabase(':memory:');
     const projects = new ProjectRepository(db);
     projects.create({ id: 'proj-1', workspaceId: 'ws-1', name: 'P1', priority: 5 });
     const loaded = projects.byWorkspaceId('ws-1');
@@ -78,9 +78,9 @@ describe('ProjectRepository', () => {
   });
 });
 
-describe('TaskRepository', () => {
-  it('任务 ID 当日序号递增', () => {
-    const db = openDatabase(':memory:');
+describe('TaskRepository', async () => {
+  it('任务 ID 当日序号递增', async () => {
+    const db = await openDatabase(':memory:');
     const projects = new ProjectRepository(db);
     const tasks = new TaskRepository(db);
     projects.create({ id: 'proj-1', workspaceId: 'ws-1', name: 'P1' });
@@ -93,8 +93,8 @@ describe('TaskRepository', () => {
     db.close();
   });
 
-  it('状态更新与派发簿记', () => {
-    const db = openDatabase(':memory:');
+  it('状态更新与派发簿记', async () => {
+    const db = await openDatabase(':memory:');
     const projects = new ProjectRepository(db);
     const tasks = new TaskRepository(db);
     projects.create({ id: 'proj-1', workspaceId: 'ws-1', name: 'P1' });
@@ -111,8 +111,8 @@ describe('TaskRepository', () => {
     db.close();
   });
 
-  it('依赖登记与自引用拒绝', () => {
-    const db = openDatabase(':memory:');
+  it('依赖登记与自引用拒绝', async () => {
+    const db = await openDatabase(':memory:');
     const projects = new ProjectRepository(db);
     const tasks = new TaskRepository(db);
     projects.create({ id: 'proj-1', workspaceId: 'ws-1', name: 'P1' });
@@ -125,9 +125,9 @@ describe('TaskRepository', () => {
   });
 });
 
-describe('TaskRunRepository', () => {
-  it('开始/结束/按任务列举，重试产生新记录', () => {
-    const db = openDatabase(':memory:');
+describe('TaskRunRepository', async () => {
+  it('开始/结束/按任务列举，重试产生新记录', async () => {
+    const db = await openDatabase(':memory:');
     const projects = new ProjectRepository(db);
     const tasks = new TaskRepository(db);
     const runs = new TaskRunRepository(db);
@@ -146,9 +146,9 @@ describe('TaskRunRepository', () => {
   });
 });
 
-describe('EventRepository 去重', () => {
-  it('同 event_id 二次写入返回 false（幂等）', () => {
-    const db = openDatabase(':memory:');
+describe('EventRepository 去重', async () => {
+  it('同 event_id 二次写入返回 false（幂等）', async () => {
+    const db = await openDatabase(':memory:');
     const events = new EventRepository(db);
     const first = events.ingest({ eventId: 'sched-occ-001', source: 'schedule', type: 'schedule.fired', workspaceId: 'ws-1' });
     const second = events.ingest({ eventId: 'sched-occ-001', source: 'schedule', type: 'schedule.fired', workspaceId: 'ws-1' });

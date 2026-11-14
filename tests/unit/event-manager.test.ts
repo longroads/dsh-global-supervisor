@@ -3,14 +3,14 @@ import { openDatabase } from '../../src/database/connection.js';
 import { EventManager } from '../../src/services/event-manager.js';
 import type { EventRow } from '../../src/types/index.js';
 
-function setup(): { manager: EventManager; db: ReturnType<typeof openDatabase> } {
-  const db = openDatabase(':memory:');
+async function setup(): Promise<{ manager: EventManager; db: Awaited<ReturnType<typeof openDatabase>> }> {
+  const db = await openDatabase(':memory:');
   return { manager: new EventManager(db), db };
 }
 
 describe('EventManager 去重与路由', () => {
   it('重复 event_id 短路：不落库不派发', async () => {
-    const { manager, db } = setup();
+    const { manager, db } = await setup();
     const seen: string[] = [];
     manager.on('schedule.fired', (e) => { seen.push(e.event_id); });
     const first = await manager.ingest({ eventId: 'occ-1', source: 'schedule', type: 'schedule.fired' });
@@ -24,7 +24,7 @@ describe('EventManager 去重与路由', () => {
   });
 
   it('精确匹配与 schedule.* 前缀通配同时生效', async () => {
-    const { manager, db } = setup();
+    const { manager, db } = await setup();
     const exact: string[] = [];
     const wildcard: string[] = [];
     manager.on('schedule.fired', (e) => { exact.push(e.event_id); });
@@ -37,7 +37,7 @@ describe('EventManager 去重与路由', () => {
   });
 
   it('handler 抛错被收集，不阻断其他 handler', async () => {
-    const { manager, db } = setup();
+    const { manager, db } = await setup();
     let secondRan = false;
     manager.on('agent.error', () => { throw new Error('handler-1 炸了'); });
     manager.on('agent.error', () => { secondRan = true; });
@@ -51,7 +51,7 @@ describe('EventManager 去重与路由', () => {
   });
 
   it('落库行携带负载与关联字段', async () => {
-    const { manager, db } = setup();
+    const { manager, db } = await setup();
     let captured: EventRow | undefined;
     manager.on('task.timeout', (e) => { captured = e; });
     await manager.ingest({

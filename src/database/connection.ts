@@ -1,18 +1,20 @@
 /**
  * SQLite 连接管理：打开数据库、设置 PRAGMA、提供事务助手。
  * 唯一允许创建 DatabaseSync 的位置（Repository 通过构造注入使用）。
+ * 沙箱纪律：顶层零 node:* 静态依赖——内建模块在使用点动态 import。
  */
-import { mkdirSync } from 'node:fs';
-import { dirname } from 'node:path';
-import { DatabaseSync } from 'node:sqlite';
+import type { DatabaseSync } from 'node:sqlite';
 import { migrateDatabase } from './migrations.js';
 
 /** 打开数据库并应用全部迁移。
  * @param dbPath - 数据库文件路径；`:memory:` 用于单元测试
  * @returns 已迁移至最新版本的连接
  */
-export function openDatabase(dbPath: string): DatabaseSync {
+export async function openDatabase(dbPath: string): Promise<DatabaseSync> {
+  const { DatabaseSync } = await import('node:sqlite');
   if (dbPath !== ':memory:') {
+    const { mkdirSync } = await import('node:fs');
+    const { dirname } = await import('node:path');
     mkdirSync(dirname(dbPath), { recursive: true });
   }
   const db = new DatabaseSync(dbPath);
