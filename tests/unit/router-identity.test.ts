@@ -82,33 +82,21 @@ describe('RouterIdentity 认领制', () => {
   });
 });
 
-describe('supervisor_claim_router 工具端到端', () => {
-  it('首次认领生效且立即获得 Router 权限', async () => {
+describe('RouterIdentity 管理端指派（assign）', () => {
+  it('assign 无条件写入并即时生效（面板物理授权语义）', async () => {
     const stack = await buildStack();
-    const tools = buildSupervisorTools(stack);
-    const claim = tools.find((t) => t.name === 'supervisor_claim_router');
-    const list = tools.find((t) => t.name === 'supervisor_workspace_list');
-    if (!claim || !list) throw new Error('工具缺失');
-
-    const before = await list.execute({}, execOf(A));
-    expect(JSON.stringify(before)).toContain('forbidden');
-
-    const claimed = await claim.execute({ mode: 'session' }, execOf(A));
-    expect((claimed as { reason: string }).reason).toBe('claimed');
-
-    // fake stack 未接 workspaceManager——权限通过后执行会失败，但 forbidden 应消失
-    const after = await list.execute({}, execOf(A));
-    expect(JSON.stringify(after)).not.toContain('forbidden');
+    const record = stack.routerIdentity.assign({ mode: 'workspace', sessionId: 's1', workspaceId: 'ws-1' });
+    expect(record.mode).toBe('workspace');
+    expect(stack.routerIdentity.current()?.workspaceId).toBe('ws-1');
   });
 
-  it('非 Router 的二次认领被拒（含结构化 reason）', async () => {
+  it('assign 覆盖已有认领（审计 actor=system）', async () => {
     const stack = await buildStack();
-    const tools = buildSupervisorTools(stack);
-    const claim = tools.find((t) => t.name === 'supervisor_claim_router');
-    if (!claim) throw new Error('工具缺失');
-    await claim.execute({ mode: 'session' }, execOf(A));
-    const denied = await claim.execute({ mode: 'session' }, execOf(B));
-    expect((denied as { ok: boolean }).ok).toBe(false);
-    expect((denied as { reason: string }).reason).toBe('denied-not-router');
+    await stack.routerIdentity.claim({ callerSessionId: A, mode: 'session' });
+    stack.routerIdentity.assign({ mode: 'session', sessionId: B });
+    expect(await stack.routerIdentity.isRouter(B)).toBe(true);
+    expect(await stack.routerIdentity.isRouter(A)).toBe(false);
+    const audits = stack.taskManager.audit.byTarget('router-identity', B);
+    expect(audits.some((a) => a.action === 'router.assign')).toBe(true);
   });
 });

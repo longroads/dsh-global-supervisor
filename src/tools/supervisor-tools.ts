@@ -23,33 +23,11 @@ const OBJ = (properties: Record<string, unknown>, required: string[] = []): Reco
 /** 结果 schema（宽松对象：工具结果字段较多，统一由 render 全量输出）。 */
 const RESULT = { type: 'object', properties: { ok: { type: 'boolean' } }, additionalProperties: true } as const;
 
-/** 构建 Router 工具（15 个管理工具 + 1 个认领工具）。 */
+/** 构建 Router 工具（15 个管理工具；Router 身份经设置面板或 patch 预置管理，见 services/router-identity.ts）。 */
 export function buildSupervisorTools(stack: SupervisorStack): ToolDefinition[] {
   const guard = routerGuard(stack);
   const routerActor = () => ({ sessionId: stack.routerIdentity.ownerSessionId(), role: 'router' as const });
   const tools: ToolDefinition[] = [];
-
-  tools.push(makeTool({
-    name: 'supervisor_claim_router',
-    description: '认领/换绑 Router 身份（首次使用入口：无 Router 时任何会话可认领；已有 Router 时仅当前 Router 可换绑）。mode=session 仅本会话；mode=workspace 需 workspace_id，该工作区下全部会话均为 Router',
-    parameters: OBJ({
-      mode: { type: 'string', description: 'session 或 workspace' },
-      workspace_id: { type: 'string', description: 'workspace 模式必填' },
-    }, ['mode']),
-    resultSchema: RESULT,
-    guard: () => true,
-    guardDeniedMessage: '',
-    handler: async (args, ctx) => {
-      const record = asRecord(args);
-      const mode = stringArg(record, 'mode') === 'workspace' ? 'workspace' : 'session';
-      const result = await stack.routerIdentity.claim({
-        callerSessionId: ctx.callerSessionId,
-        mode,
-        workspaceId: optionalStringArg(record, 'workspace_id'),
-      });
-      return { ...result, current: stack.routerIdentity.current() };
-    },
-  }));
 
   tools.push(makeTool({
     name: 'supervisor_workspace_list',

@@ -95,4 +95,26 @@ export class RouterIdentity {
     });
     return { ok: true, reason: existing ? 'rebound' : 'claimed' };
   }
+
+  /**
+   * 管理端指派（设置面板通道）：面板操作视为设置页物理访问授权，
+   * 无条件写入身份（不经"本人发起"路径）；审计 actor 为 system。
+   */
+  assign(input: { mode: 'session' | 'workspace'; sessionId: string; workspaceId?: string }): RouterIdentityRecord {
+    const record: RouterIdentityRecord = {
+      mode: input.mode,
+      sessionId: input.sessionId,
+      workspaceId: input.mode === 'workspace' ? input.workspaceId : undefined,
+      claimedAt: new Date().toISOString(),
+    };
+    this.settings.setJson(SETTING_KEY, record);
+    this.audit.log({
+      actorRole: 'system',
+      action: 'router.assign',
+      targetType: 'router-identity',
+      targetId: record.mode === 'workspace' ? (record.workspaceId as string) : record.sessionId,
+      detailJson: JSON.stringify({ mode: record.mode, via: 'settings-panel' }),
+    });
+    return record;
+  }
 }

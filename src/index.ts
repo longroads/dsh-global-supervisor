@@ -151,6 +151,9 @@ export function apply(ctx: Context, config: PluginConfig): void {
             payloadJson: JSON.stringify({ message: payload.error instanceof Error ? payload.error.message : String(payload.error) }),
           });
         });
+        // 设置面板 HTTP API（Router 身份管理入口；契约见 docs/UI_PANEL_PLAN.md）
+        const { registerSettingsApi } = await import('./services/settings-api.js');
+        await registerSettingsApi(ctx, stack);
         const { buildSupervisorTools } = await import('./tools/supervisor-tools.js');
         const { buildWorkerReportTool } = await import('./tools/worker-report-tool.js');
         const all = [...buildSupervisorTools(stack), buildWorkerReportTool(stack)];
