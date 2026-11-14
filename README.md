@@ -35,11 +35,11 @@ node24 node_modules\typescript\bin\tsc -p tsconfig.json   # 构建（含类型�
 node24 node_modules\vitest\vitest.mjs run                  # 全部测试
 ```
 
-详见 [docs/DEVELOPMENT_PLAN.md](docs/DEVELOPMENT_PLAN.md)（开发方案）、[docs/API_COMPATIBILITY.md](docs/API_COMPATIBILITY.md)（API 使用契约）、[AGENTS.md](AGENTS.md)（工程纪律）。
+详见 [docs/DEVELOPMENT_PLAN.md](docs/DEVELOPMENT_PLAN.md)（开发方案）、[docs/API_COMPATIBILITY.md](docs/API_COMPATIBILITY.md)（API 使用契约，10/10 VERIFIED + 宿主沙箱契约）、[docs/TEST_PLAN.md](docs/TEST_PLAN.md)（测试与验收映射）、[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)（部署运维）、[AGENTS.md](AGENTS.md)（工程纪律）。
 
 ## 状态
 
-当前版本 0.1.0-alpha.1：S1-S4 完成（API 探针、工程骨架、数据模型、核心服务纯逻辑层），Adapter 层与工具接口等待 probe 运行时验证（见 API_COMPATIBILITY.md 待复核清单）。
+当前版本 0.1.0-alpha.1：**S1-S6 第一阶段全部完成**——API 探针（真实 Host 10/10 VERIFIED）、工程骨架、八表数据模型、核心服务（TaskManager/ModelQueue/EventManager/看门狗/通知器）、Adapter 四件套、15 个工具（三段式权限防线）。已在真实 Desktop Host 装载验证（服务栈 + 工具注册 + SQLite 建库）；73/73 单测全绿。剩余会话级闭环验证与 S7（IM 推送/外部事件源/主动发现）见 TEST_PLAN 验收映射。
 
 ## License
 
