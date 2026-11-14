@@ -52,13 +52,13 @@ function fakeRes() {
 }
 
 describe('设置面板 HTTP API', () => {
-  it('注册两条路由：settings（resource）与 claim（handler）', async () => {
+  it('注册三条路由：settings（resource）、client-ping 与 claim（handler）', async () => {
     const { ctx, routes } = fakeCtxWithWebServer();
     const stack = await buildStack(ctx);
     await registerSettingsApi(ctx, stack);
-    expect(routes.map((r) => r.path)).toEqual(['/global-supervisor/settings', '/global-supervisor/claim']);
+    expect(routes.map((r) => r.path)).toEqual(['/global-supervisor/settings', '/global-supervisor/client-ping', '/global-supervisor/claim']);
     expect(typeof routes[0]?.resource).toBe('function');
-    expect(typeof routes[1]?.handler).toBe('function');
+    expect(typeof routes[2]?.handler).toBe('function');
   });
 
   it('GET settings 返回 workspace 清单与当前 Router（null 表示未设置）', async () => {
@@ -84,7 +84,7 @@ describe('设置面板 HTTP API', () => {
       },
     };
     const res = fakeRes();
-    await routes[1]?.handler?.(req, res);
+    await routes[2]?.handler?.(req, res);
     expect(res.statusCode).toBe(200);
     expect(JSON.parse(res.body).router.sessionId).toBe('s-9');
     expect(stack.routerIdentity.current()?.sessionId).toBe('s-9');
@@ -97,12 +97,12 @@ describe('设置面板 HTTP API', () => {
 
     const badOrigin = { headers: { origin: 'http://evil', host: 'h:1' }, on: (_e: string, cb: (c?: Buffer) => void) => cb() };
     const res1 = fakeRes();
-    await routes[1]?.handler?.(badOrigin, res1);
+    await routes[2]?.handler?.(badOrigin, res1);
     expect(res1.statusCode).toBe(403);
 
     const badBody = { headers: { origin: 'http://h:1', host: 'h:1' }, on: (event: string, cb: (chunk?: Buffer) => void) => { if (event === 'data') cb(Buffer.from('not-json')); if (event === 'end') cb(); } };
     const res2 = fakeRes();
-    await routes[1]?.handler?.(badBody, res2);
+    await routes[2]?.handler?.(badBody, res2);
     expect(res2.statusCode).toBe(400);
   });
 });

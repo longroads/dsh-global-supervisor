@@ -128,6 +128,10 @@ function SupervisorPanel() {
   );
 }
 function apply(ctx) {
+  try {
+    void fetch(api("global-supervisor/client-ping"), { method: "POST" }).catch(() => void 0);
+  } catch {
+  }
   if (!ctx.slots || typeof ctx.slots.register !== "function") {
     console.warn("[global-supervisor] host slots \u670D\u52A1\u4E0D\u53EF\u7528\u2014\u2014\u8BBE\u7F6E\u9762\u677F\u672A\u6CE8\u518C");
     return;

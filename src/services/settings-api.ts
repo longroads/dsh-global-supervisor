@@ -46,6 +46,22 @@ export async function registerSettingsApi(ctx: Context, stack: SupervisorStack):
 
   webServer.register({
     kind: 'exact',
+    path: '/global-supervisor/client-ping',
+    handler: async (req: IncomingMessage, res: ServerResponse) => {
+      res.setHeader('content-type', 'application/json; charset=utf-8');
+      res.statusCode = 200;
+      res.end('{"ok":true}');
+      const { appendFile, mkdir } = await import('node:fs/promises');
+      const os = await import('node:os');
+      const path = await import('node:path');
+      const file = path.join(os.homedir(), '.dsh', 'global-supervisor-load.log');
+      await mkdir(path.dirname(file), { recursive: true }).catch(() => undefined);
+      await appendFile(file, `${new Date().toISOString()} [client-ping] ${JSON.stringify({ ua: req.headers['user-agent'] ?? '' })}\n`, 'utf8').catch(() => undefined);
+    },
+  });
+
+  webServer.register({
+    kind: 'exact',
     path: '/global-supervisor/claim',
     handler: async (req: IncomingMessage, res: ServerResponse) => {
       res.setHeader('content-type', 'application/json; charset=utf-8');

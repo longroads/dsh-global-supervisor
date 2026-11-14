@@ -113,6 +113,12 @@ function SupervisorPanel(): unknown {
 
 /** client 入口：注册全局监督设置面板（slots 服务缺失时降级为不注册）。 */
 export function apply(ctx: ClientContext): void {
+  // 加载探针：向 host 上报 client bundle 已被执行（诊断 client 发现链路）
+  try {
+    void fetch(api('global-supervisor/client-ping'), { method: 'POST' }).catch(() => undefined);
+  } catch {
+    // fetch 不可用时静默（非浏览器环境）
+  }
   if (!ctx.slots || typeof ctx.slots.register !== 'function') {
     console.warn('[global-supervisor] host slots 服务不可用——设置面板未注册');
     return;
