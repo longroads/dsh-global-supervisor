@@ -128,6 +128,12 @@ export function apply(ctx: Context, config: PluginConfig): void {
         const tools = await awaitService<{ register: (tool: ToolDefinition) => unknown }>(ctx, 'tools');
         const { createStack } = await import('./runtime.js');
         const stack = await createStack(ctx, { dataDir: config.dataDir });
+        // Host 重启存疑恢复（需求说明第八节）：超时窗口已过判 failed/timeout，未过保持 running 待 Worker 汇报
+        const recovery = stack.taskManager.recoverFromRestart();
+        if (recovery.expiredIds.length > 0 || recovery.pendingIds.length > 0) {
+          void writeLoadMarker('restart-recovery', recovery);
+          ctx.logger.info(`重启恢复：${recovery.pendingIds.length} 个任务存疑待汇报，${recovery.expiredIds.length} 个已判超时`);
+        }
         const { buildSupervisorTools } = await import('./tools/supervisor-tools.js');
         const { buildWorkerReportTool } = await import('./tools/worker-report-tool.js');
         const all = [...buildSupervisorTools(stack, config.routerSessionId), buildWorkerReportTool(stack)];
