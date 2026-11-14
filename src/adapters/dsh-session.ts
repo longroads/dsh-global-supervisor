@@ -4,7 +4,13 @@
  */
 import type { Context } from '@deepseek-ai/cordis';
 import type { SessionPersistence } from '@deepseek-ai/dsh-session-persistence';
+import type { SessionId } from '@deepseek-ai/dsh-session';
 import { awaitService } from './host-services.js';
+
+/** 会话查询服务面（readTitleSnapshots = DSH 侧边栏会话名的同源读取）。 */
+interface SessionQueryLike {
+  readTitleSnapshots(sessionIds: readonly SessionId[], signal?: AbortSignal): Promise<Array<{ sessionId: SessionId; status: string; title?: { title: string; source: string } }>>;
+}
 
 /** 会话快照纯数据视图。 */
 export interface SessionSnapshot {
@@ -43,5 +49,27 @@ export class DshSessionAdapter {
   async sessionExists(sessionId: string): Promise<boolean> {
     const snapshots = await this.listSnapshots();
     return snapshots.some((snapshot) => snapshot.sessionId === sessionId);
+  }
+
+  /**
+   * 批量读取会话标题（与 DSH 侧边栏显示的会话名同源：log-backed session/title 折叠）。
+   * 服务不可用或读取失败时返回空 Map——调用方降级到派生标签。
+   */
+  async readTitles(sessionIds: readonly string[]): Promise<Map<string, string>> {
+    if (sessionIds.length === 0) return new Map();
+    try {
+      const query = await awaitService<SessionQueryLike>(this.ctx, 'sessionQuery');
+      const results = await query.readTitleSnapshots(sessionIds as SessionId[]);
+      const titles = new Map<string, string>();
+      for (const item of results) {
+        const title = item.title?.title;
+        if (typeof title === 'string' && title.trim() !== '') {
+          titles.set(String(item.sessionId), title.trim());
+        }
+      }
+      return titles;
+    } catch {
+      return new Map();
+    }
   }
 }

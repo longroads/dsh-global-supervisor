@@ -53,6 +53,8 @@ export async function registerSettingsApi(ctx: Context, stack: SupervisorStack):
       const overview = await stack.workspaceManager.listWorkspaceOverview(true);
       const snapshots = await stack.sessionAdapter.listSnapshots();
       const labels = new Map(snapshots.map((s) => [s.sessionId, s]));
+      const allSessionIds = overview.flatMap((item) => [...item.sessionIds]);
+      const titles = await stack.sessionAdapter.readTitles(allSessionIds);
       const claimed = stack.routerIdentity.current();
       const fallbackSession = stack.routerIdentity.ownerSessionId();
       const router: SettingsApiResponse['router'] = claimed
@@ -66,7 +68,10 @@ export async function registerSettingsApi(ctx: Context, stack: SupervisorStack):
           id: item.workspaceId,
           title: item.title,
           path: item.path,
-          sessions: item.sessionIds.map((id) => ({ id, label: sessionLabel(labels.get(id) ?? { sessionId: id }) })),
+          sessions: item.sessionIds.map((id) => ({
+            id,
+            label: titles.get(id) ?? sessionLabel(labels.get(id) ?? { sessionId: id }),
+          })),
         })),
       };
       return jsonResponse(payload);
