@@ -50,10 +50,11 @@ export function buildSupervisorTools(stack: SupervisorStack): ToolDefinition[] {
 
   tools.push(makeTool({
     name: 'supervisor_workspace_get',
-    description: '查看单个项目详情（workspace_id 或 project_id 二选一）',
+    description: '查看单个项目详情（workspace_id 或 project_id 二选一）。返回含 available_sessions（可读会话名）——绑定 Worker 会话时从中选 session_id 填入 supervisor_workspace_update 的 worker_session_id',
     parameters: OBJ({ workspace_id: { type: 'string' }, project_id: { type: 'string' } }),
     resultSchema: RESULT,
     guard, guardDeniedMessage: DENIED,
+    timeoutMs: 15_000,
     handler: async (args) => {
       const record = asRecord(args);
       const byWorkspace = optionalStringArg(record, 'workspace_id');
@@ -63,7 +64,15 @@ export function buildSupervisorTools(stack: SupervisorStack): ToolDefinition[] {
         : byProject
           ? await stack.workspaceManager.getProject(byProject)
           : undefined;
-      return project ? { ok: true, project } : { ok: false, error: 'not-found' };
+      if (!project) return { ok: false, error: 'not-found' };
+      const workspace = await stack.workspaceManager.listWorkspaceOverview(true).then((all) => all.find((item) => item.workspaceId === project.workspaceId));
+      const sessionIds = workspace?.sessionIds ?? [];
+      const titles = await stack.sessionAdapter.readTitles([...sessionIds]);
+      return {
+        ok: true,
+        project,
+        available_sessions: sessionIds.map((id) => ({ id, label: titles.get(id) ?? id.slice(0, 18) })),
+      };
     },
   }));
 
@@ -109,7 +118,7 @@ export function buildSupervisorTools(stack: SupervisorStack): ToolDefinition[] {
 
   tools.push(makeTool({
     name: 'supervisor_workspace_update',
-    description: '更新项目属性（priority/description/status/worker_session_id）',
+    description: '更新项目属性（priority/description/status/worker_session_id）。worker_session_id 从 supervisor_workspace_get 返回的 available_sessions 中选（含可读会话名）',
     parameters: OBJ({ project_id: { type: 'string' }, priority: { type: 'integer' }, description: { type: 'string' }, worker_session_id: { type: 'string' } }, ['project_id']),
     resultSchema: RESULT,
     guard, guardDeniedMessage: DENIED,
