@@ -24,7 +24,7 @@ import type { ToolsService } from '@deepseek-ai/dsh-tools';
 import type { ProbeCheck, ProbeReport } from './types/index.js';
 
 /** 插件版本（与 package.json 同步维护）。 */
-const PLUGIN_VERSION = '0.1.0-alpha.1';
+const PLUGIN_VERSION = '0.1.0-beta.1';
 
 /** 单项检查的安全包装：任何抛错都转为 UNAVAILABLE 记录，不中断整体。 */
 async function check(id: string, name: string, body: () => Promise<string>): Promise<ProbeCheck> {
