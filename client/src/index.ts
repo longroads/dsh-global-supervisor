@@ -1,15 +1,18 @@
 /**
  * dsh-global-supervisor client：设置面板（Router 身份管理唯一动态入口）。
- * 契约见 docs/UI_PANEL_PLAN.md：apply(ctx) → slots.register('settings.section') → React 元素。
+ * 契约见 docs/UI_PANEL_PLAN.md：apply(ctx) → slots.inject('settings.section') → register。
  * 第一版零 UI 库依赖（原生元素 + 内联样式），react 经 host 模块表注入（构建 external）。
  */
 import { createElement as h, useCallback, useEffect, useState } from 'react';
 
-/** client ctx 的最小服务面（slots 注入，见 package.json client.inject）。 */
+/** client 侧服务访问白名单（Cordis 门禁：属性访问需在此声明——better-sidebar 同款机制）。 */
+export const inject = ['slots'];
+
+/** client ctx 的最小服务面。 */
 interface ClientContext {
-  slots?: {
+  slots: {
     register(meta: Record<string, unknown>, build: (props?: Record<string, unknown>) => unknown): (() => void) | unknown;
-    inject(slot: string, ready: () => void): void;
+    inject(slot: string, ready: () => unknown): unknown;
   };
   effect?(fn: () => unknown, label?: string): unknown;
 }
@@ -111,16 +114,14 @@ function SupervisorPanel(): unknown {
     h('div', { style: style.hint }, '保存后即时生效（无需重启）；此前创建的定时巡检投递目标不自动迁移，请重设调度。'));
 }
 
-/** client 入口：注册全局监督设置面板（slots 服务缺失时降级为不注册）。 */
+/** client 入口：注册全局监督设置面板（slots 就绪后经 inject 回调注册——宿主范式）。 */
 export function apply(ctx: ClientContext): void {
-  // 加载探针：上报 client 执行状态与 slots 可用性（诊断设置卡片缺失）
+  // 加载探针：上报 client 执行状态（诊断链路；在任何 slots 访问前发出，避免门禁异常吞掉上报）
+  let registered = false;
+  let registerReturn = 'pending';
   try {
-    const slotsType = ctx.slots === undefined ? 'undefined' : typeof ctx.slots;
-    const hasRegister = !!ctx.slots && typeof ctx.slots.register === 'function';
-    let registered = false;
-    let registerReturn = 'none';
-    try {
-      if (hasRegister) {
+    ctx.slots.inject('settings.section', () => {
+      try {
         const off = ctx.slots.register(
           {
             name: 'settings.section',
@@ -132,28 +133,23 @@ export function apply(ctx: ClientContext): void {
         );
         registered = true;
         registerReturn = typeof off === 'function' ? 'disposer' : String(off);
+      } catch (e) {
+        registerReturn = `throw:${String(e)}`;
       }
-    } catch (e) {
-      registerReturn = `throw:${String(e)}`;
-    }
+    });
+    registerReturn = 'injected';
+  } catch (e) {
+    registerReturn = `outer-throw:${String(e)}`;
+  }
+  const report = (): void => {
     void fetch(api('global-supervisor/client-ping'), {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ slotsType, hasRegister, registered, registerReturn }),
+      body: JSON.stringify({ phase: 'apply', registered, registerReturn }),
     }).catch(() => undefined);
-    if (!hasRegister) {
-      console.warn('[global-supervisor] host slots 服务不可用——设置面板未注册');
-      return;
-    }
-    if (!registered) {
-      console.warn('[global-supervisor] slots.register 未成功：', registerReturn);
-      return;
-    }
-    ctx.slots.inject('settings.section', () => undefined);
-    if (typeof ctx.effect === 'function') {
-      ctx.effect(() => undefined, 'global-supervisor: settings section');
-    }
-  } catch (outer) {
-    console.warn('[global-supervisor] apply 异常', outer);
+  };
+  report();
+  if (typeof ctx.effect === 'function') {
+    ctx.effect(() => undefined, 'global-supervisor: settings section');
   }
 }

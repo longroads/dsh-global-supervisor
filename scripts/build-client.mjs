@@ -20,5 +20,6 @@ const result = await build({
   logLevel: 'info',
 });
 const code = result.outputFiles[0].text;
-writeFileSync(outfile, `${banner}\n${code}\nreturn module.exports;\n});\n`, 'utf8');
+// 尾部依次闭合：factory 函数体 } 、load 的对象字面量 } 、load 调用 ) 与 ;
+writeFileSync(outfile, `${banner}\n${code}\nreturn module.exports;\n}});\n`, 'utf8');
 console.log(`client bundle -> ${outfile} (${code.length} chars)`);

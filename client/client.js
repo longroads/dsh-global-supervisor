@@ -23,10 +23,12 @@ var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: tru
 // client/src/index.ts
 var index_exports = {};
 __export(index_exports, {
-  apply: () => apply
+  apply: () => apply,
+  inject: () => inject
 });
 module.exports = __toCommonJS(index_exports);
 var import_react = require("react");
+var inject = ["slots"];
 function api(path) {
   const relative = path.replace(/^\/+/, "");
   if (typeof document === "undefined") return `/${relative}`;
@@ -128,13 +130,11 @@ function SupervisorPanel() {
   );
 }
 function apply(ctx) {
+  let registered = false;
+  let registerReturn = "pending";
   try {
-    const slotsType = ctx.slots === void 0 ? "undefined" : typeof ctx.slots;
-    const hasRegister = !!ctx.slots && typeof ctx.slots.register === "function";
-    let registered = false;
-    let registerReturn = "none";
-    try {
-      if (hasRegister) {
+    ctx.slots.inject("settings.section", () => {
+      try {
         const off = ctx.slots.register(
           {
             name: "settings.section",
@@ -146,31 +146,26 @@ function apply(ctx) {
         );
         registered = true;
         registerReturn = typeof off === "function" ? "disposer" : String(off);
+      } catch (e) {
+        registerReturn = `throw:${String(e)}`;
       }
-    } catch (e) {
-      registerReturn = `throw:${String(e)}`;
-    }
+    });
+    registerReturn = "injected";
+  } catch (e) {
+    registerReturn = `outer-throw:${String(e)}`;
+  }
+  const report = () => {
     void fetch(api("global-supervisor/client-ping"), {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ slotsType, hasRegister, registered, registerReturn })
+      body: JSON.stringify({ phase: "apply", registered, registerReturn })
     }).catch(() => void 0);
-    if (!hasRegister) {
-      console.warn("[global-supervisor] host slots \u670D\u52A1\u4E0D\u53EF\u7528\u2014\u2014\u8BBE\u7F6E\u9762\u677F\u672A\u6CE8\u518C");
-      return;
-    }
-    if (!registered) {
-      console.warn("[global-supervisor] slots.register \u672A\u6210\u529F\uFF1A", registerReturn);
-      return;
-    }
-    ctx.slots.inject("settings.section", () => void 0);
-    if (typeof ctx.effect === "function") {
-      ctx.effect(() => void 0, "global-supervisor: settings section");
-    }
-  } catch (outer) {
-    console.warn("[global-supervisor] apply \u5F02\u5E38", outer);
+  };
+  report();
+  if (typeof ctx.effect === "function") {
+    ctx.effect(() => void 0, "global-supervisor: settings section");
   }
 }
 
 return module.exports;
-});
+}});
