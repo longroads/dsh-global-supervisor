@@ -43,6 +43,7 @@ export interface WorkspaceOverviewItem {
   priority: number;
   workerSessionId: string | null;
   sessionCount: number;
+  sessionIds: readonly string[];
 }
 
 /** 启动对账的漂移报告。 */
@@ -91,9 +92,9 @@ export class WorkspaceManager {
       const row = byWorkspace.get(workspace.id);
       if (row) {
         const view = this.toView(row, workspace);
-        items.push({ managed: true, projectId: view.projectId, workspaceId: view.workspaceId, path: view.workspacePath, title: view.title, status: view.status, health: view.health, priority: view.priority, workerSessionId: view.workerSessionId, sessionCount: view.sessionCount });
+        items.push({ managed: true, projectId: view.projectId, workspaceId: view.workspaceId, path: view.workspacePath, title: view.title, status: view.status, health: view.health, priority: view.priority, workerSessionId: view.workerSessionId, sessionCount: view.sessionCount, sessionIds: workspace.sessionIds });
       } else {
-        items.push({ managed: false, workspaceId: workspace.id, path: workspace.path, title: workspace.title, status: 'unmanaged', health: 'unknown', priority: 0, workerSessionId: null, sessionCount: workspace.sessionIds.length });
+        items.push({ managed: false, workspaceId: workspace.id, path: workspace.path, title: workspace.title, status: 'unmanaged', health: 'unknown', priority: 0, workerSessionId: null, sessionCount: workspace.sessionIds.length, sessionIds: workspace.sessionIds });
       }
     }
     return items;

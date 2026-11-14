@@ -88,7 +88,7 @@ function SupervisorPanel(): unknown {
     h('div', { style: style.row },
       h('span', { style: style.label }, '当前 Router'),
       h('strong', null, data.router
-        ? `${data.router.mode === 'workspace' ? '工作区模式' : '会话模式'} · ${data.router.sessionId.slice(0, 18)}…（${data.router.claimedAt.slice(0, 10)} 设置）`
+        ? `${data.router.source === 'preset' ? '（预置）' : ''}${data.router.mode === 'workspace' ? '工作区模式' : '会话模式'} · ${data.router.sessionId.slice(0, 18)}…${data.router.claimedAt ? `（${data.router.claimedAt.slice(0, 10)} 设置）` : ''}`
         : '未设置（无预置且未指派）')),
     h('div', { style: style.row },
       h('span', { style: style.label }, '模式'),

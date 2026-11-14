@@ -85,7 +85,7 @@ function SupervisorPanel() {
       "div",
       { style: style.row },
       (0, import_react.createElement)("span", { style: style.label }, "\u5F53\u524D Router"),
-      (0, import_react.createElement)("strong", null, data.router ? `${data.router.mode === "workspace" ? "\u5DE5\u4F5C\u533A\u6A21\u5F0F" : "\u4F1A\u8BDD\u6A21\u5F0F"} \xB7 ${data.router.sessionId.slice(0, 18)}\u2026\uFF08${data.router.claimedAt.slice(0, 10)} \u8BBE\u7F6E\uFF09` : "\u672A\u8BBE\u7F6E\uFF08\u65E0\u9884\u7F6E\u4E14\u672A\u6307\u6D3E\uFF09")
+      (0, import_react.createElement)("strong", null, data.router ? `${data.router.source === "preset" ? "\uFF08\u9884\u7F6E\uFF09" : ""}${data.router.mode === "workspace" ? "\u5DE5\u4F5C\u533A\u6A21\u5F0F" : "\u4F1A\u8BDD\u6A21\u5F0F"} \xB7 ${data.router.sessionId.slice(0, 18)}\u2026${data.router.claimedAt ? `\uFF08${data.router.claimedAt.slice(0, 10)} \u8BBE\u7F6E\uFF09` : ""}` : "\u672A\u8BBE\u7F6E\uFF08\u65E0\u9884\u7F6E\u4E14\u672A\u6307\u6D3E\uFF09")
     ),
     (0, import_react.createElement)(
       "div",

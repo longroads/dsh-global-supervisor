@@ -16,7 +16,8 @@ interface WebServerLike {
 
 /** GET settings 的响应形态（client 面板消费）。 */
 export interface SettingsApiResponse {
-  router: { mode: string; sessionId: string; workspaceId?: string; claimedAt: string } | null;
+  /** 当前生效身份（认领记录优先，其次 patch 预置；source 区分来源，preset 无 claimedAt 时间戳） */
+  router: { mode: string; sessionId: string; workspaceId?: string; claimedAt: string; source: 'claimed' | 'preset' } | null;
   workspaces: Array<{ id: string; title: string; path: string; sessionIds: readonly string[] }>;
 }
 
@@ -36,9 +37,16 @@ export async function registerSettingsApi(ctx: Context, stack: SupervisorStack):
     path: '/global-supervisor/settings',
     resource: async () => {
       const workspaces = await stack.workspaceManager.listWorkspaceOverview(true);
+      const claimed = stack.routerIdentity.current();
+      const fallbackSession = stack.routerIdentity.ownerSessionId();
+      const router: SettingsApiResponse['router'] = claimed
+        ? { ...claimed, source: 'claimed' }
+        : fallbackSession !== ''
+          ? { mode: 'session', sessionId: fallbackSession, claimedAt: '', source: 'preset' }
+          : null;
       const payload: SettingsApiResponse = {
-        router: stack.routerIdentity.current() ?? null,
-        workspaces: workspaces.map((item) => ({ id: item.workspaceId, title: item.title, path: item.path, sessionIds: [] })),
+        router,
+        workspaces: workspaces.map((item) => ({ id: item.workspaceId, title: item.title, path: item.path, sessionIds: item.sessionIds })),
       };
       return jsonResponse(payload);
     },
