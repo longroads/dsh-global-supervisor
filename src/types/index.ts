@@ -41,3 +41,90 @@ export interface RoleConfig {
   /** Router 的固定会话 ID（supervisor_* 工具唯一挂载点） */
   routerSessionId: string;
 }
+
+/** 任务状态（严格状态机，见 src/services/task-state-machine.ts）。 */
+export type TaskStatus =
+  | 'pending'
+  | 'queued'
+  | 'running'
+  | 'completed'
+  | 'blocked'
+  | 'need_human'
+  | 'failed'
+  | 'canceled';
+
+/** 项目状态（业务层；归档≠删除 DSH workspace 注册）。 */
+export type ProjectStatus = 'active' | 'paused' | 'archived';
+
+/** 项目健康度（由最近 Worker 汇报推导）。 */
+export type ProjectHealth = 'ok' | 'warning' | 'blocked' | 'unknown';
+
+/** 单次任务执行的终局。 */
+export type RunOutcome = 'completed' | 'failed' | 'timeout' | 'canceled';
+
+/** 事件来源。 */
+export type EventSource = 'schedule' | 'im' | 'agent' | 'system' | 'internal';
+
+/** projects 表行。 */
+export interface ProjectRow {
+  id: string;
+  workspace_id: string;
+  name: string;
+  description: string;
+  priority: number;
+  status: ProjectStatus;
+  worker_session_id: string | null;
+  goals_json: string;
+  health: ProjectHealth;
+  last_review_at: string | null;
+  next_review_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+/** tasks 表行。 */
+export interface TaskRow {
+  id: string;
+  project_id: string;
+  parent_task_id: string | null;
+  title: string;
+  description: string;
+  priority: number;
+  status: TaskStatus;
+  assigned_session_id: string | null;
+  schedule_binding_id: string | null;
+  retry_count: number;
+  max_retries: number;
+  timeout_at: string | null;
+  due_at: string | null;
+  last_report_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+/** task_runs 表行。 */
+export interface TaskRunRow {
+  id: number;
+  task_id: string;
+  session_id: string;
+  attempt_no: number;
+  started_at: string;
+  ended_at: string | null;
+  outcome: RunOutcome | null;
+  result_summary: string | null;
+  error_message: string | null;
+  usage_json: string | null;
+}
+
+/** events 表行。 */
+export interface EventRow {
+  id: number;
+  event_id: string;
+  source: EventSource;
+  type: string;
+  workspace_id: string | null;
+  task_id: string | null;
+  payload_json: string;
+  dedup_hash: string | null;
+  created_at: string;
+}
