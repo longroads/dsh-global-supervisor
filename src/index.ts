@@ -120,7 +120,7 @@ export function apply(ctx: Context, config: PluginConfig): void {
     void writeLoadMarker('probe-disabled', { note: 'config.probe=false——若期望探针运行，请检查 patch 配置' });
   }
 
-  // 业务模式：Router 会话配置就绪时组装服务栈并注册 15 个工具
+  // 业务模式：Router 会话配置就绪时组装服务栈并注册 16 个工具（方案 §7 的 15 个 + adopt 纳管既有 workspace）
   if (config.routerSessionId.trim() !== '') {
     void (async () => {
       try {

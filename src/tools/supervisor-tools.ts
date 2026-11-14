@@ -1,5 +1,5 @@
 /**
- * Router 侧工具集（14 个，方案 §7）：唯一构建入口 buildSupervisorTools。
+ * Router 侧工具集（15 个，方案 §7 的 14 个 + workspace_adopt 纳管）：唯一构建入口 buildSupervisorTools。
  * 权限：执行期校验调用者 === routerSessionId（toolkit 第二防线）；
  * 业务归属校验由 TaskManager（assigned_session）承担第三防线。
  */
@@ -57,6 +57,26 @@ export function buildSupervisorTools(stack: SupervisorStack, routerSessionId: st
           ? await stack.workspaceManager.getProject(byProject)
           : undefined;
       return project ? { ok: true, project } : { ok: false, error: 'not-found' };
+    },
+  }));
+
+  tools.push(makeTool({
+    name: 'supervisor_workspace_adopt',
+    description: '纳管既有 DSH workspace 为受管项目（幂等；重复纳管返回既有项目）。首个使用入口：把已有工作区纳入统一管理',
+    parameters: OBJ({ workspace_id: { type: 'string', description: 'DSH workspace ID（supervisor_workspace_list 可查）' }, priority: { type: 'integer', description: '0-9，默认 3' }, description: { type: 'string' } }, ['workspace_id']),
+    resultSchema: RESULT,
+    guard, guardDeniedMessage: DENIED,
+    handler: async (args) => {
+      const record = asRecord(args);
+      try {
+        const project = await stack.workspaceManager.adoptWorkspace(stringArg(record, 'workspace_id'), {
+          priority: intArg(record, 'priority', 3, 0, 9),
+          description: stringArg(record, 'description'),
+        });
+        return { ok: true, project };
+      } catch (error) {
+        return { ok: false, error: error instanceof Error ? error.message : String(error) };
+      }
     },
   }));
 
