@@ -34,6 +34,13 @@ node24 node_modules\vitest\vitest.mjs run                     # 全部测试
 - 错误处理：关键操作必须 try/catch + 日志 + 可恢复状态；禁止吞错。
 - 测试与实现同 commit 提交；测试不得 pin 文案，只测机器消费值（状态转换、ID、计数、协议字段）。
 
+## 宿主沙箱契约（详见 docs/API_COMPATIBILITY.md，违者插件加载失败或服务不可见）
+
+- 服务访问一律 `ctx.get('serviceName')`；**禁止属性访问**（inject 声明制门禁，名字错误会导致插件永不加载）。
+- 模块顶层**零 `node:*` 静态依赖**；内建模块（node:sqlite / node:fs / node:os / node:path）在使用点动态 `await import()`。
+- workspaceRegistry 与 schedule 就绪晚于 apply 时刻：Adapter 必须等待式解析（参照 probe 的 `awaitService`）。
+- 工具注册经 `ctx.get('tools').register(definition, options?)`；ctx 只读，façade 白名单动词之外的一切不可用。
+
 ## 目录职责
 
 ```
