@@ -50,6 +50,21 @@ function brief(value: unknown, maxChars = 300): string {
   return text.length > maxChars ? `${text.slice(0, maxChars)}…(截断)` : text;
 }
 
+/** 等待式服务解析：宿主服务链异步初始化（如 schedule 依赖 sessionPersistence），
+ * apply 时刻可能未就绪——轮询 ctx.get 直到出现或超时。 */
+async function awaitService(ctx: Context, name: string, retries = 40, intervalMs = 200): Promise<unknown> {
+  for (let i = 0; i < retries; i++) {
+    try {
+      const service = ctx.get(name);
+      if (service !== undefined && service !== null) return service;
+    } catch {
+      // 门禁抛错时同样等待重试（apply 早期 façade 可能尚未就绪）
+    }
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+  return undefined;
+}
+
 /** 解析插件数据目录：优先 dsh-home-paths（V6），失败降级 ~/.dsh。 */
 async function resolveDataDir(configured?: string): Promise<{ dir: string; basis: string }> {
   if (configured && configured.trim() !== '') {
@@ -105,18 +120,19 @@ export async function runProbe(ctx: Context, configuredDir?: string): Promise<Pr
   }));
 
   // --- 服务存在性与实际调用 ---
-  // 宿主沙箱门禁：属性访问需要 inject 声明，ctx.get() 按需解析（官方插件模式）
+  // 宿主沙箱门禁：属性访问需要 inject 声明，ctx.get() 按需解析（官方插件模式）；
+  // 服务链异步初始化，统一经 awaitService 等待就绪。
   checks.push(await check('service.workspace-registry', 'ctx.workspaceRegistry 存在且 list() 可调用', async () => {
-    const reg = ctx.get('workspaceRegistry') as WorkspaceRegistry | undefined;
-    if (!reg) throw new Error('ctx.workspaceRegistry 未注入');
+    const reg = (await awaitService(ctx, 'workspaceRegistry')) as WorkspaceRegistry | undefined;
+    if (!reg) throw new Error('ctx.workspaceRegistry 未就绪（等待 8s 后仍不可见）');
     const list = reg.list();
     const first = list[0];
     return `list() 返回 ${list.length} 个 workspace；方法集：${['create', 'get', 'list', 'delete', 'resolveByPath'].filter((m) => typeof (reg as unknown as Record<string, unknown>)[m] === 'function').join('/')}；示例：${first ? `${first.id} → ${first.path}` : '(空)'}`;
   }));
 
   checks.push(await check('service.agents', 'ctx.agents 存在及关键方法签名（create/resume/get/list）', async () => {
-    const agents = ctx.get('agents') as AgentRegistry | undefined;
-    if (!agents) throw new Error('ctx.agents 未注入');
+    const agents = (await awaitService(ctx, 'agents')) as AgentRegistry | undefined;
+    if (!agents) throw new Error('ctx.agents 未就绪');
     const missing = ['create', 'resume', 'get', 'list'].filter((m) => typeof (agents as unknown as Record<string, unknown>)[m] !== 'function');
     if (missing.length > 0) throw new Error(`缺少方法：${missing.join('/')}`);
     const live = agents.list();
@@ -124,15 +140,15 @@ export async function runProbe(ctx: Context, configuredDir?: string): Promise<Pr
   }));
 
   checks.push(await check('service.schedule', 'ctx.schedule（Host-wide）存在且 catalog() 可调用', async () => {
-    const schedule = ctx.get('schedule') as ScheduleService | undefined;
-    if (!schedule) throw new Error('ctx.schedule 未注入（旧版 DSH 无 Host-wide Schedule）');
+    const schedule = (await awaitService(ctx, 'schedule')) as ScheduleService | undefined;
+    if (!schedule) throw new Error('ctx.schedule 未就绪（等待 8s 后仍不可见——旧版 DSH 无 Host-wide Schedule）');
     const catalog = await schedule.catalog();
     return `catalog() 返回 ${catalog.length} 个任务；方法集：${['create', 'list', 'catalog', 'view', 'history', 'edit', 'run', 'deleteInactive'].filter((m) => typeof (schedule as unknown as Record<string, unknown>)[m] === 'function').join('/')}`;
   }));
 
   checks.push(await check('service.session-persistence', 'ctx.sessionPersistence 存在及快照查询', async () => {
-    const sp = ctx.get('sessionPersistence') as SessionPersistence | undefined;
-    if (!sp) throw new Error('ctx.sessionPersistence 未注入');
+    const sp = (await awaitService(ctx, 'sessionPersistence')) as SessionPersistence | undefined;
+    if (!sp) throw new Error('ctx.sessionPersistence 未就绪');
     const missing = ['create', 'open', 'stat', 'list'].filter((m) => typeof (sp as unknown as Record<string, unknown>)[m] !== 'function');
     if (missing.length > 0) throw new Error(`缺少方法：${missing.join('/')}`);
     const snapshots = await sp.list();
@@ -140,8 +156,8 @@ export async function runProbe(ctx: Context, configuredDir?: string): Promise<Pr
   }));
 
   checks.push(await check('service.tools', 'ctx.tools 存在且 register 可用', async () => {
-    const tools = ctx.get('tools') as ToolsService | undefined;
-    if (!tools) throw new Error('ctx.tools 未注入');
+    const tools = (await awaitService(ctx, 'tools')) as ToolsService | undefined;
+    if (!tools) throw new Error('ctx.tools 未就绪');
     if (typeof tools.register !== 'function') throw new Error('ctx.tools.register 不是函数');
     return 'register(definition, options?) 签名存在';
   }));
@@ -161,7 +177,8 @@ export async function runProbe(ctx: Context, configuredDir?: string): Promise<Pr
   checks.push(await check('api.tool-exec-context', '工具执行上下文可获调用者（V1：probe_echo 工具）', async () => {
     // 本检查只确认工具注册通道；exec.agent 的实际捕获依赖模型调用 probe_echo，
     // 结果在会话触发后由 captureToolInvocation 补充记录。
-    if (typeof ctx.tools?.register !== 'function') throw new Error('工具注册不可用');
+    const tools = ctx.get('tools') as { register: unknown } | undefined;
+    if (!tools || typeof tools.register !== 'function') throw new Error('工具注册不可用');
     return 'probe_echo 已注册（SKIPPED→VERIFIED 待任意会话调用一次后复核）';
   }));
 
