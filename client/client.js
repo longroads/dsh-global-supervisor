@@ -105,7 +105,7 @@ function SupervisorPanel() {
           setSessionId("");
         } },
         (0, import_react.createElement)("option", { value: "" }, "\u2014 \u9009\u62E9\u5DE5\u4F5C\u533A \u2014"),
-        ...data.workspaces.map((w) => (0, import_react.createElement)("option", { key: w.id, value: w.id }, `${w.title}\uFF08${w.sessionIds.length} \u4F1A\u8BDD\uFF09`))
+        ...data.workspaces.map((w) => (0, import_react.createElement)("option", { key: w.id, value: w.id }, `${w.title}\uFF08${w.sessions.length} \u4F1A\u8BDD\uFF09`))
       )
     ) : null,
     (0, import_react.createElement)(
@@ -116,7 +116,7 @@ function SupervisorPanel() {
         "select",
         { style: style.select, value: sessionId, onChange: (e) => setSessionId(e.target.value) },
         (0, import_react.createElement)("option", { value: "" }, "\u2014 \u9009\u62E9\u4F1A\u8BDD \u2014"),
-        ...(mode === "workspace" ? selectedWorkspace?.sessionIds ?? [] : data.workspaces.flatMap((w) => w.sessionIds)).map((s) => (0, import_react.createElement)("option", { key: s, value: s }, s))
+        ...(mode === "workspace" ? selectedWorkspace?.sessions ?? [] : data.workspaces.flatMap((w) => w.sessions)).map((s) => (0, import_react.createElement)("option", { key: s.id, value: s.id }, s.label))
       ),
       (0, import_react.createElement)("span", { style: style.hint }, mode === "workspace" ? "\u8BE5\u5DE5\u4F5C\u533A\u4E0B\u5168\u90E8\u4F1A\u8BDD\u5747\u4E3A Router\uFF08\u8BA4\u9886\u53D1\u8D77\u8005\u8BB0\u5F55\uFF09" : "\u4EC5\u8BE5\u4F1A\u8BDD\u53EF\u8C03\u7528 supervisor \u5DE5\u5177")
     ),

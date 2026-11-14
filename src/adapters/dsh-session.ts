@@ -10,6 +10,7 @@ import { awaitService } from './host-services.js';
 export interface SessionSnapshot {
   sessionId: string;
   cwd: string | undefined;
+  createdAt: number | undefined;
   revision: unknown;
   sizeBytes: number | undefined;
 }
@@ -31,6 +32,7 @@ export class DshSessionAdapter {
       return {
         sessionId: String(record['sessionId'] ?? header?.['id'] ?? ''),
         cwd: typeof header?.['cwd'] === 'string' ? (header['cwd'] as string) : undefined,
+        createdAt: typeof header?.['createdAt'] === 'number' ? (header['createdAt'] as number) : undefined,
         revision: record['revision'],
         sizeBytes: typeof record['sizeBytes'] === 'number' ? (record['sizeBytes'] as number) : undefined,
       };

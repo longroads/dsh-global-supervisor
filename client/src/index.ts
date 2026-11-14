@@ -19,8 +19,8 @@ interface ClientContext {
 
 /** GET /global-supervisor/settings 响应。 */
 interface SettingsPayload {
-  router: { mode: string; sessionId: string; workspaceId?: string; claimedAt: string } | null;
-  workspaces: Array<{ id: string; title: string; path: string; sessionIds: readonly string[] }>;
+  router: { mode: string; sessionId: string; workspaceId?: string; claimedAt: string; source: 'claimed' | 'preset' } | null;
+  workspaces: Array<{ id: string; title: string; path: string; sessions: Array<{ id: string; label: string }> }>;
 }
 
 function api(path: string): string {
@@ -99,14 +99,14 @@ function SupervisorPanel(): unknown {
           h('span', { style: style.label }, '工作区'),
           h('select', { style: style.select, value: workspaceId, onChange: (e: Event) => { setWorkspaceId((e.target as HTMLSelectElement).value); setSessionId(''); } },
             h('option', { value: '' }, '— 选择工作区 —'),
-            ...data.workspaces.map((w) => h('option', { key: w.id, value: w.id }, `${w.title}（${w.sessionIds.length} 会话）`))))
+            ...data.workspaces.map((w) => h('option', { key: w.id, value: w.id }, `${w.title}（${w.sessions.length} 会话）`))))
       : null,
     h('div', { style: style.row },
       h('span', { style: style.label }, 'Router 会话'),
       h('select', { style: style.select, value: sessionId, onChange: (e: Event) => setSessionId((e.target as HTMLSelectElement).value) },
         h('option', { value: '' }, '— 选择会话 —'),
-        ...(mode === 'workspace' ? (selectedWorkspace?.sessionIds ?? []) : data.workspaces.flatMap((w) => w.sessionIds))
-          .map((s) => h('option', { key: s, value: s }, s))),
+        ...(mode === 'workspace' ? (selectedWorkspace?.sessions ?? []) : data.workspaces.flatMap((w) => w.sessions))
+          .map((s) => h('option', { key: s.id, value: s.id }, s.label))),
       h('span', { style: style.hint }, mode === 'workspace' ? '该工作区下全部会话均为 Router（认领发起者记录）' : '仅该会话可调用 supervisor 工具')),
     h('div', { style: style.row },
       h('button', { style: style.button, disabled: busy || sessionId === '' || (mode === 'workspace' && workspaceId === ''), onClick: submit }, busy ? '保存中…' : '保存'),

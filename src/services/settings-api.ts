@@ -15,10 +15,24 @@ interface WebServerLike {
 }
 
 /** GET settings 的响应形态（client 面板消费）。 */
+export interface SessionOption {
+  id: string;
+  /** 面板下拉显示名：目录名 · 日期 · 短 ID（快照数据派生，不读事件流） */
+  label: string;
+}
+
 export interface SettingsApiResponse {
   /** 当前生效身份（认领记录优先，其次 patch 预置；source 区分来源，preset 无 claimedAt 时间戳） */
   router: { mode: string; sessionId: string; workspaceId?: string; claimedAt: string; source: 'claimed' | 'preset' } | null;
-  workspaces: Array<{ id: string; title: string; path: string; sessionIds: readonly string[] }>;
+  workspaces: Array<{ id: string; title: string; path: string; sessions: SessionOption[] }>;
+}
+
+/** 从快照派生会话显示名（用户不认识原始 ID；标题需读事件流故第一版不取）。 */
+function sessionLabel(snapshot: { sessionId: string; cwd?: string; createdAt?: number }): string {
+  const dir = snapshot.cwd !== undefined ? snapshot.cwd.split(/[\\/]/).filter(Boolean).pop() ?? '' : '';
+  const date = snapshot.createdAt !== undefined ? new Date(snapshot.createdAt).toISOString().slice(0, 10) : '';
+  const short = snapshot.sessionId.replace(/^session-/, '').slice(0, 8);
+  return [dir, date, short].filter((part) => part !== '').join(' · ');
 }
 
 function jsonResponse(data: unknown, status = 200): Response {
@@ -36,7 +50,9 @@ export async function registerSettingsApi(ctx: Context, stack: SupervisorStack):
     kind: 'exact',
     path: '/global-supervisor/settings',
     resource: async () => {
-      const workspaces = await stack.workspaceManager.listWorkspaceOverview(true);
+      const overview = await stack.workspaceManager.listWorkspaceOverview(true);
+      const snapshots = await stack.sessionAdapter.listSnapshots();
+      const labels = new Map(snapshots.map((s) => [s.sessionId, s]));
       const claimed = stack.routerIdentity.current();
       const fallbackSession = stack.routerIdentity.ownerSessionId();
       const router: SettingsApiResponse['router'] = claimed
@@ -46,7 +62,12 @@ export async function registerSettingsApi(ctx: Context, stack: SupervisorStack):
           : null;
       const payload: SettingsApiResponse = {
         router,
-        workspaces: workspaces.map((item) => ({ id: item.workspaceId, title: item.title, path: item.path, sessionIds: item.sessionIds })),
+        workspaces: overview.map((item) => ({
+          id: item.workspaceId,
+          title: item.title,
+          path: item.path,
+          sessions: item.sessionIds.map((id) => ({ id, label: sessionLabel(labels.get(id) ?? { sessionId: id }) })),
+        })),
       };
       return jsonResponse(payload);
     },

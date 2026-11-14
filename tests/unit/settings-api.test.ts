@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { Context } from '@deepseek-ai/cordis';
 import { openDatabase } from '../../src/database/connection.js';
+import { DshSessionAdapter } from '../../src/adapters/dsh-session.js';
 import { DshWorkspaceAdapter } from '../../src/adapters/dsh-workspace.js';
 import { WorkspaceManager } from '../../src/services/workspace-manager.js';
 import { RouterIdentity } from '../../src/services/router-identity.js';
@@ -23,7 +24,9 @@ function fakeCtxWithWebServer(): { ctx: Context; routes: CapturedRoute[] } {
         ? { register: (route: CapturedRoute) => { routes.push(route); return () => undefined; } }
         : name === 'workspaceRegistry'
           ? { list: () => [{ id: 'ws-1', path: 'E:\\a', title: 'alpha', sessionIds: ['s-1'], createdAt: '', updatedAt: '' }] }
-          : {},
+          : name === 'sessionPersistence'
+            ? { list: () => [{ sessionId: 's-1', header: { id: 's-1', cwd: 'E:\\a', createdAt: 1731400000000 }, revision: 1 }] }
+            : {},
   } as unknown as Context;
   return { ctx, routes };
 }
@@ -37,6 +40,7 @@ async function buildStack(ctx: Context): Promise<SupervisorStack> {
     taskManager,
     routerIdentity: new RouterIdentity(db, ''),
     workspaceManager: new WorkspaceManager(new DshWorkspaceAdapter(ctx), db),
+    sessionAdapter: new DshSessionAdapter(ctx),
   } as unknown as SupervisorStack;
 }
 
@@ -66,9 +70,11 @@ describe('设置面板 HTTP API', () => {
     const stack = await buildStack(ctx);
     await registerSettingsApi(ctx, stack);
     const response = await routes[0]?.resource?.(new Request('http://x/global-supervisor/settings'));
-    const payload = (await response?.json()) as { router: unknown; workspaces: Array<{ id: string }> };
+    const payload = (await response?.json()) as { router: unknown; workspaces: Array<{ id: string; sessions: Array<{ id: string; label: string }> }> };
     expect(payload.router).toBeNull();
     expect(payload.workspaces[0]?.id).toBe('ws-1');
+    expect(payload.workspaces[0]?.sessions[0]?.id).toBe('s-1');
+    expect(payload.workspaces[0]?.sessions[0]?.label).toContain('a · 20');
   });
 
   it('POST claim：合法体指派成功并写入身份', async () => {
