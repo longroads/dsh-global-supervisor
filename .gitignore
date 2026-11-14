@@ -32,3 +32,6 @@ coverage/
 # agent 会话目录
 .omo/
 .opencode/
+
+# 用户参考资料（非工程文件）
+tmp/superagent/
