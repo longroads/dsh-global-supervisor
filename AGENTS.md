@@ -14,8 +14,10 @@ DSH（DeepSeek Harness）全局监督插件：跨 Workspace 的项目管理、�
 ## 常用命令（node24 指代上述 node.exe 路径）
 
 ```
-node24 node_modules\typescript\bin\tsc -p tsconfig.json      # 构建（同时是类型检查）
+node24 node_modules\typescript\bin\tsc -p tsconfig.json      # 构建 host 侧（同时是类型检查）
+node24 scripts\build-client.mjs                              # 构建 client 侧（设置面板 bundle）
 node24 node_modules\vitest\vitest.mjs run                     # 全部测试
+node24 scripts\smoke-client.cjs                              # client bundle 本地冒烟（factory/注册链路）
 ```
 
 ## 提交前必须
@@ -40,6 +42,8 @@ node24 node_modules\vitest\vitest.mjs run                     # 全部测试
 - 模块顶层**零 `node:*` 静态依赖**；内建模块（node:sqlite / node:fs / node:os / node:path）在使用点动态 `await import()`。
 - workspaceRegistry 与 schedule 就绪晚于 apply 时刻：Adapter 必须等待式解析（参照 probe 的 `awaitService`）。
 - 工具注册经 `ctx.get('tools').register(definition, options?)`；ctx 只读，façade 白名单动词之外的一切不可用。
+- **client 侧同款门禁**：client 入口须 `export const inject = ['slots']` 之类声明，否则 `ctx.slots` 访问抛错、面板不注册。
+- **client bundle 格式**：`window.__ModuleLoader__.load({ id, factory })` + CJS 体（`scripts/build-client.mjs` 生成，`scripts/smoke-client.cjs` 本地冒烟）。
 
 ## 目录职责
 

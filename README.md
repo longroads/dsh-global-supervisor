@@ -31,8 +31,9 @@ pnpm add "dsh-global-supervisor@link:<本仓库路径>"
 
 ```powershell
 # 构建与测试须用 DSH runtime node（本机 PATH node 过旧）
-node24 node_modules\typescript\bin\tsc -p tsconfig.json   # 构建（含类型检查）
-node24 node_modules\vitest\vitest.mjs run                  # 全部测试
+node24 node_modules\typescript\bin\tsc -p tsconfig.json   # host 侧构建（含类型检查）
+node24 scripts\build-client.mjs                        # client 侧构建（设置面板 bundle）
+node24 node_modules\vitest\vitest.mjs run              # 全部测试
 ```
 
 详见 [docs/USER_GUIDE.md](docs/USER_GUIDE.md)（使用说明）、[docs/DEVELOPMENT_PLAN.md](docs/DEVELOPMENT_PLAN.md)（开发方案）、[docs/API_COMPATIBILITY.md](docs/API_COMPATIBILITY.md)（API 使用契约，10/10 VERIFIED + 宿主沙箱契约）、[docs/TEST_PLAN.md](docs/TEST_PLAN.md)（测试与验收映射）、[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)（部署运维）、[docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)（排障）、[AGENTS.md](AGENTS.md)（工程纪律）。
