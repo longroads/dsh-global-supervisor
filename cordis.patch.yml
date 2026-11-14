@@ -1,0 +1,9 @@
+# dsh-global-supervisor 插件默认配置
+# profile 的 cordis.patch.yml 可覆盖以下任意项
+- id: global-supervisor
+  name: dsh-global-supervisor
+  config:
+    # 开发期 API 探针：插件启动时运行兼容性自检，报告写入数据目录
+    probe: false
+    # 插件数据目录（默认 ~/.dsh/global-supervisor，存放 SQLite 与日志）
+    dataDir: ""
