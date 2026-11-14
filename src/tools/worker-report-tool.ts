@@ -48,6 +48,12 @@ export function buildWorkerReportTool(stack: SupervisorStack): ToolDefinition {
         throw error;
       }
       const outcome = stack.agentController.applyWorkerReport(report, ctx.callerSessionId);
+      // 需人介入时唤醒 Router 会话转述（通知尽力而为，不阻断汇报结果）
+      if (outcome.accepted && report.needHuman) {
+        void stack.notifier.notify(
+          `任务 ${report.taskId} 需要人工决策：${report.summary ?? ''}${report.blockers.length > 0 ? `（阻碍：${report.blockers.join('；')}）` : ''}`,
+        );
+      }
       return outcome;
     },
   });

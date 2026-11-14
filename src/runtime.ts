@@ -10,7 +10,9 @@ import { DshWorkspaceAdapter } from './adapters/dsh-workspace.js';
 import type { DatabaseSync } from 'node:sqlite';
 import { EventManager } from './services/event-manager.js';
 import { AgentController } from './services/agent-controller.js';
+import { ProjectMonitor } from './services/project-monitor.js';
 import { SchedulerService } from './services/scheduler.js';
+import { SessionDirectNotifier } from './services/notifier.js';
 import { TaskManager } from './services/task-manager.js';
 import { WorkspaceManager } from './services/workspace-manager.js';
 
@@ -24,13 +26,15 @@ export interface SupervisorStack {
   scheduler: SchedulerService;
   eventManager: EventManager;
   sessionAdapter: DshSessionAdapter;
+  monitor: ProjectMonitor;
+  notifier: SessionDirectNotifier;
 }
 
 /** 数据库文件名（位于插件数据目录下）。 */
 const DB_FILENAME = 'supervisor.db';
 
 /** 组装服务栈（打开数据库并完成迁移）。 */
-export async function createStack(ctx: Context, options: { dataDir?: string }): Promise<SupervisorStack> {
+export async function createStack(ctx: Context, options: { dataDir?: string; routerSessionId?: string }): Promise<SupervisorStack> {
   const dataDir = await resolveDataDir(options.dataDir);
   const { openDatabase } = await import('./database/connection.js');
   const { join } = await import('node:path');
@@ -46,6 +50,8 @@ export async function createStack(ctx: Context, options: { dataDir?: string }): 
   const workspaceManager = new WorkspaceManager(workspaceAdapter, db);
   const agentController = new AgentController(agentAdapter, taskManager, db);
   const scheduler = new SchedulerService(scheduleAdapter, db);
+  const monitor = new ProjectMonitor(taskManager);
+  const notifier = new SessionDirectNotifier(agentAdapter, options.routerSessionId ?? '');
 
   return {
     db,
@@ -56,6 +62,8 @@ export async function createStack(ctx: Context, options: { dataDir?: string }): 
     scheduler,
     eventManager,
     sessionAdapter,
+    monitor,
+    notifier,
   };
 }
 

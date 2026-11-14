@@ -8,7 +8,9 @@ import { DshSessionAdapter } from '../../src/adapters/dsh-session.js';
 import { DshWorkspaceAdapter } from '../../src/adapters/dsh-workspace.js';
 import { AgentController } from '../../src/services/agent-controller.js';
 import { EventManager } from '../../src/services/event-manager.js';
+import { ProjectMonitor } from '../../src/services/project-monitor.js';
 import { SchedulerService } from '../../src/services/scheduler.js';
+import { SessionDirectNotifier } from '../../src/services/notifier.js';
 import { TaskManager } from '../../src/services/task-manager.js';
 import { WorkspaceManager } from '../../src/services/workspace-manager.js';
 import type { SupervisorStack } from '../../src/runtime.js';
@@ -28,6 +30,7 @@ function execOf(sessionId: string): ToolRunContext {
 async function buildStack(): Promise<SupervisorStack> {
   const db = await openDatabase(':memory:');
   const fakeCtx = { get: () => ({}) } as unknown as Context;
+  const agentAdapter = new DshAgentAdapter(fakeCtx);
   const taskManager = new TaskManager(db);
   taskManager.projects.create({ id: 'proj-1', workspaceId: 'ws-1', name: 'P1', workerSessionId: WORKER_SESSION });
   return {
@@ -35,10 +38,12 @@ async function buildStack(): Promise<SupervisorStack> {
     dataDir: ':memory:',
     taskManager,
     workspaceManager: new WorkspaceManager(new DshWorkspaceAdapter(fakeCtx), db),
-    agentController: new AgentController(new DshAgentAdapter(fakeCtx), taskManager, db),
+    agentController: new AgentController(agentAdapter, taskManager, db),
     scheduler: new SchedulerService(new DshScheduleAdapter(fakeCtx), db),
     eventManager: new EventManager(db),
     sessionAdapter: new DshSessionAdapter(fakeCtx),
+    monitor: new ProjectMonitor(taskManager),
+    notifier: new SessionDirectNotifier(agentAdapter, ROUTER_SESSION),
   };
 }
 
@@ -141,6 +146,18 @@ describe('worker_report 工具全链路', () => {
     expect((outcome as { accepted: boolean }).accepted).toBe(false);
     expect((outcome as { reason: string }).reason).toBe('invalid-payload');
     expect((outcome as { issues: string[] }).issues.some((i) => i.includes('evil'))).toBe(true);
+  });
+
+  it('need_human 汇报：接受并尽力通知 Router（fake 适配器下通知失败不阻断）', async () => {
+    const stack = await buildStack();
+    const taskId = await dispatchedTask(stack);
+    const tool = buildWorkerReportTool(stack);
+    const outcome = await tool.execute(
+      { workspace_id: 'ws-1', task_id: taskId, status: 'need_human', need_human: true, summary: '需要确认部署方案', blockers: ['缺少生产凭据'] },
+      execOf(WORKER_SESSION),
+    );
+    expect(outcome).toEqual({ accepted: true, reason: 'applied', taskStatus: 'need_human' });
+    expect(stack.taskManager.tasks.byId(taskId)?.status).toBe('need_human');
   });
 
   it('Worker 越权汇报他人任务：归属校验拒绝（第三防线）', async () => {
