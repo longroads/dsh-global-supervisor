@@ -83,6 +83,10 @@ function SupervisorPanel(): unknown {
   if (data === null) return h('div', { style: style.card }, '加载中…');
 
   const selectedWorkspace = data.workspaces.find((w) => w.id === workspaceId);
+  // 会话模式下跨工作区平铺时带工作区名前缀（同名会话可区分）
+  const sessionOptions = mode === 'workspace'
+    ? (selectedWorkspace?.sessions ?? []).map((s) => ({ id: s.id, label: s.label }))
+    : data.workspaces.flatMap((w) => w.sessions.map((s) => ({ id: s.id, label: `${w.title} / ${s.label}` })));
 
   return h('div', { style: style.card },
     h('div', { style: style.row },
@@ -105,8 +109,7 @@ function SupervisorPanel(): unknown {
       h('span', { style: style.label }, 'Router 会话'),
       h('select', { style: style.select, value: sessionId, onChange: (e: Event) => setSessionId((e.target as HTMLSelectElement).value) },
         h('option', { value: '' }, '— 选择会话 —'),
-        ...(mode === 'workspace' ? (selectedWorkspace?.sessions ?? []) : data.workspaces.flatMap((w) => w.sessions))
-          .map((s) => h('option', { key: s.id, value: s.id }, s.label))),
+        ...sessionOptions.map((s) => h('option', { key: s.id, value: s.id }, s.label))),
       h('span', { style: style.hint }, mode === 'workspace' ? '该工作区下全部会话均为 Router（认领发起者记录）' : '仅该会话可调用 supervisor 工具')),
     h('div', { style: style.row },
       h('button', { style: style.button, disabled: busy || sessionId === '' || (mode === 'workspace' && workspaceId === ''), onClick: submit }, busy ? '保存中…' : '保存'),
