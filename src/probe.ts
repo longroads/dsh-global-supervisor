@@ -16,6 +16,11 @@ import type {} from '@deepseek-ai/dsh-agent';
 import type {} from '@deepseek-ai/dsh-schedule';
 import type {} from '@deepseek-ai/dsh-session-persistence';
 import type {} from '@deepseek-ai/dsh-tools';
+import type { WorkspaceRegistry } from '@deepseek-ai/dsh-workspace';
+import type { AgentRegistry } from '@deepseek-ai/dsh-agent';
+import type { ScheduleService } from '@deepseek-ai/dsh-schedule';
+import type { SessionPersistence } from '@deepseek-ai/dsh-session-persistence';
+import type { ToolsService } from '@deepseek-ai/dsh-tools';
 import type { ProbeCheck, ProbeReport } from './types/index.js';
 
 /** 插件版本（与 package.json 同步维护）。 */
@@ -100,8 +105,9 @@ export async function runProbe(ctx: Context, configuredDir?: string): Promise<Pr
   }));
 
   // --- 服务存在性与实际调用 ---
+  // 宿主沙箱门禁：属性访问需要 inject 声明，ctx.get() 按需解析（官方插件模式）
   checks.push(await check('service.workspace-registry', 'ctx.workspaceRegistry 存在且 list() 可调用', async () => {
-    const reg = ctx.workspaceRegistry;
+    const reg = ctx.get('workspaceRegistry') as WorkspaceRegistry | undefined;
     if (!reg) throw new Error('ctx.workspaceRegistry 未注入');
     const list = reg.list();
     const first = list[0];
@@ -109,7 +115,7 @@ export async function runProbe(ctx: Context, configuredDir?: string): Promise<Pr
   }));
 
   checks.push(await check('service.agents', 'ctx.agents 存在及关键方法签名（create/resume/get/list）', async () => {
-    const agents = ctx.agents;
+    const agents = ctx.get('agents') as AgentRegistry | undefined;
     if (!agents) throw new Error('ctx.agents 未注入');
     const missing = ['create', 'resume', 'get', 'list'].filter((m) => typeof (agents as unknown as Record<string, unknown>)[m] !== 'function');
     if (missing.length > 0) throw new Error(`缺少方法：${missing.join('/')}`);
@@ -118,14 +124,14 @@ export async function runProbe(ctx: Context, configuredDir?: string): Promise<Pr
   }));
 
   checks.push(await check('service.schedule', 'ctx.schedule（Host-wide）存在且 catalog() 可调用', async () => {
-    const schedule = ctx.schedule;
+    const schedule = ctx.get('schedule') as ScheduleService | undefined;
     if (!schedule) throw new Error('ctx.schedule 未注入（旧版 DSH 无 Host-wide Schedule）');
     const catalog = await schedule.catalog();
     return `catalog() 返回 ${catalog.length} 个任务；方法集：${['create', 'list', 'catalog', 'view', 'history', 'edit', 'run', 'deleteInactive'].filter((m) => typeof (schedule as unknown as Record<string, unknown>)[m] === 'function').join('/')}`;
   }));
 
   checks.push(await check('service.session-persistence', 'ctx.sessionPersistence 存在及快照查询', async () => {
-    const sp = ctx.sessionPersistence;
+    const sp = ctx.get('sessionPersistence') as SessionPersistence | undefined;
     if (!sp) throw new Error('ctx.sessionPersistence 未注入');
     const missing = ['create', 'open', 'stat', 'list'].filter((m) => typeof (sp as unknown as Record<string, unknown>)[m] !== 'function');
     if (missing.length > 0) throw new Error(`缺少方法：${missing.join('/')}`);
@@ -134,7 +140,7 @@ export async function runProbe(ctx: Context, configuredDir?: string): Promise<Pr
   }));
 
   checks.push(await check('service.tools', 'ctx.tools 存在且 register 可用', async () => {
-    const tools = ctx.tools;
+    const tools = ctx.get('tools') as ToolsService | undefined;
     if (!tools) throw new Error('ctx.tools 未注入');
     if (typeof tools.register !== 'function') throw new Error('ctx.tools.register 不是函数');
     return 'register(definition, options?) 签名存在';

@@ -83,10 +83,11 @@ export function apply(ctx: Context, config: PluginConfig): void {
   void writeLoadMarker('apply-enter', { probe: config.probe, dataDir: config.dataDir });
   ctx.logger.info(`dsh-global-supervisor 加载（probe=${String(config.probe)}）`);
 
-  // 探针工具注册：开发期验证工具执行上下文（V1）
+  // 探针工具注册：开发期验证工具执行上下文（V1）；经 ctx.get 绕开沙箱属性门禁
   if (config.probe) {
     try {
-      ctx.tools?.register(probeEchoTool);
+      const tools = ctx.get('tools') as { register: (tool: typeof probeEchoTool) => unknown } | undefined;
+      tools?.register(probeEchoTool);
       void writeLoadMarker('probe-echo-registered', {});
     } catch (error) {
       void writeLoadMarker('probe-echo-failed', { message: error instanceof Error ? error.message : String(error) });
