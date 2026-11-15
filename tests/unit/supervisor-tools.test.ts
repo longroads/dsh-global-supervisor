@@ -19,6 +19,7 @@ import { RoutingRuleRepository } from '../../src/database/repository/routing-rul
 import { ThreadSubscriptionRepository } from '../../src/database/repository/thread-subscription-repository.js';
 import type { SupervisorStack } from '../../src/runtime.js';
 import { isGuardDenied, makeTool } from '../../src/tools/toolkit.js';
+import { parseWorkerReport } from '../../src/protocols/worker-report.js';
 import { buildSupervisorTools } from '../../src/tools/supervisor-tools.js';
 import { buildWorkerReportTool } from '../../src/tools/worker-report-tool.js';
 
@@ -272,6 +273,50 @@ describe('supervisor 工具权限与任务流', () => {
     const result = await list.execute({ status: 'passed_through' }, execOf(ROUTER_SESSION));
     const events = (result as { events: Array<{ event_id: string; status: string }> }).events;
     expect(events.some((e) => e.event_id === 'wh-2' && e.status === 'passed_through')).toBe(true);
+  });
+
+  it('supervisor_recall 按 task_id：来源事件、同 Thread 事件、汇报与执行历史', async () => {
+    const stack = await buildStack();
+    await stack.eventManager.ingest({ eventId: 'wh-1', source: 'webhook', type: 'issue.opened', threadId: 'th-1', payloadJson: '{"body":"起源"}' });
+    await stack.eventManager.ingest({ eventId: 'wh-2', source: 'webhook', type: 'issue.comment', threadId: 'th-1' });
+    const tools = buildSupervisorTools(stack);
+    const create = tools.find((t) => t.name === 'supervisor_task_create') as ToolDefinition;
+    const created = await create.execute({ project_id: 'proj-1', title: 'T', source_event_id: 'wh-1' }, execOf(ROUTER_SESSION));
+    const taskId = (created as { task: { id: string } }).task.id;
+    stack.taskManager.enqueue(taskId, { sessionId: ROUTER_SESSION, role: 'router' });
+    stack.taskManager.markDispatched(taskId, WORKER_SESSION, null);
+    stack.taskManager.applyWorkerReport(parseWorkerReport({ workspace_id: 'ws-1', task_id: taskId, status: 'running', progress: 30 }), WORKER_SESSION);
+    const recall = tools.find((t) => t.name === 'supervisor_recall') as ToolDefinition;
+    const result = await recall.execute({ task_id: taskId }, execOf(ROUTER_SESSION));
+    expect((result as { ok: boolean }).ok).toBe(true);
+    expect((result as { source_event: { event_id: string } | null }).source_event?.event_id).toBe('wh-1');
+    const threadEvents = (result as { thread_events: Array<{ event_id: string }> }).thread_events;
+    expect(threadEvents.map((e) => e.event_id).sort()).toEqual(['wh-1', 'wh-2']);
+    expect((result as { reports: unknown[] }).reports).toHaveLength(1);
+    expect((result as { runs: unknown[] }).runs).toHaveLength(1);
+    const links = (result as { links: { event_ids: string[]; task_ids: string[]; thread_ids: string[] } }).links;
+    expect(links.task_ids).toEqual([taskId]);
+    expect(links.event_ids).toContain('wh-2');
+    expect(links.thread_ids).toEqual(['th-1']);
+  });
+
+  it('supervisor_recall 按 event_id：同 Thread 事件与订阅任务；无锚点拒绝', async () => {
+    const stack = await buildStack();
+    await stack.eventManager.ingest({ eventId: 'wh-1', source: 'webhook', type: 'issue.opened', threadId: 'th-1' });
+    const tools = buildSupervisorTools(stack);
+    const create = tools.find((t) => t.name === 'supervisor_task_create') as ToolDefinition;
+    const created = await create.execute({ project_id: 'proj-1', title: 'T', source_event_id: 'wh-1' }, execOf(ROUTER_SESSION));
+    const taskId = (created as { task: { id: string } }).task.id;
+    const recall = tools.find((t) => t.name === 'supervisor_recall') as ToolDefinition;
+    const byEvent = await recall.execute({ event_id: 'wh-1' }, execOf(ROUTER_SESSION));
+    expect((byEvent as { ok: boolean }).ok).toBe(true);
+    const tasks = (byEvent as { tasks: Array<{ id: string; status: string }> }).tasks;
+    expect(tasks.some((t) => t.id === taskId && t.status === 'pending')).toBe(true);
+    const links = (byEvent as { links: { event_ids: string[]; task_ids: string[] } }).links;
+    expect(links.task_ids).toContain(taskId);
+    expect(links.event_ids).toContain('wh-1');
+    const noAnchor = await recall.execute({}, execOf(ROUTER_SESSION));
+    expect((noAnchor as { ok: boolean }).ok).toBe(false);
   });
 });
 

@@ -43,6 +43,14 @@ export class ThreadSubscriptionRepository {
     return rows.map((row) => row.thread_id);
   }
 
+  /** 该 Thread 的全部订阅任务 ID（不限状态；召回用）。 */
+  tasksForThread(threadId: string): string[] {
+    const rows = this.db
+      .prepare('SELECT task_id FROM thread_subscriptions WHERE thread_id = ? ORDER BY created_at')
+      .all(threadId) as unknown as Array<{ task_id: string }>;
+    return rows.map((row) => row.task_id);
+  }
+
   /** 该 Thread 下处于 running 状态的订阅者（JOIN tasks，含未派发会话的 running 任务）。 */
   runningSubscribers(threadId: string): ThreadSubscriber[] {
     return this.db

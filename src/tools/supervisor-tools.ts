@@ -439,6 +439,62 @@ export function buildSupervisorTools(stack: SupervisorStack): ToolDefinition[] {
     },
   }));
 
+  tools.push(makeTool({
+    name: 'supervisor_recall',
+    description: '按 event_id 或 task_id（二选一）召回关联上下文：事件 → 同 Thread 事件 + 订阅任务；任务 → 来源事件 + Thread 事件 + Worker 汇报 + 执行历史。返回一跳关联（links）',
+    parameters: OBJ({
+      event_id: { type: 'string', description: '锚点事件 ID（supervisor_event_list 可查）' },
+      task_id: { type: 'string', description: '锚点任务 ID（task-xxx）' },
+    }),
+    resultSchema: RESULT,
+    guard, guardDeniedMessage: DENIED,
+    handler: (args) => {
+      const record = asRecord(args);
+      const eventId = optionalStringArg(record, 'event_id');
+      const taskId = optionalStringArg(record, 'task_id');
+      if (eventId === undefined && taskId === undefined) {
+        return { ok: false, error: 'event_id 与 task_id 至少提供一个' };
+      }
+      const events = stack.eventManager.repository;
+      const threadSubs = stack.taskManager.threadSubs;
+      if (taskId !== undefined) {
+        const task = stack.taskManager.tasks.byId(taskId);
+        if (!task) return { ok: false, error: `task-not-found: ${taskId}` };
+        const sourceEvent = task.source_event_id !== null ? events.byEventId(task.source_event_id) : undefined;
+        const threadIds = threadSubs.threadsOfTask(taskId);
+        const threadEvents = threadIds.flatMap((threadId) => events.byThread(threadId, 20));
+        const eventIds = new Set<string>(threadEvents.map((e) => e.event_id));
+        if (sourceEvent !== undefined) eventIds.add(sourceEvent.event_id);
+        return {
+          ok: true,
+          task,
+          runs: stack.taskManager.runs.byTask(taskId),
+          reports: stack.taskManager.reports.byTask(taskId),
+          source_event: sourceEvent ?? null,
+          thread_events: threadEvents,
+          links: { event_ids: [...eventIds], task_ids: [taskId], thread_ids: threadIds },
+        };
+      }
+      const anchorEventId = eventId as string;
+      const event = events.byEventId(anchorEventId);
+      if (!event) return { ok: false, error: `event-not-found: ${anchorEventId}` };
+      const threadEvents = event.thread_id !== null ? events.byThread(event.thread_id, 20) : [];
+      const taskIds = event.thread_id !== null ? threadSubs.tasksForThread(event.thread_id) : [];
+      const eventIds = new Set<string>(threadEvents.map((e) => e.event_id));
+      eventIds.add(anchorEventId);
+      return {
+        ok: true,
+        event,
+        thread_events: threadEvents,
+        tasks: taskIds.map((id) => {
+          const task = stack.taskManager.tasks.byId(id);
+          return { id, status: task?.status ?? 'unknown', assigned_session_id: task?.assigned_session_id ?? null };
+        }),
+        links: { event_ids: [...eventIds], task_ids: taskIds, thread_ids: event.thread_id !== null ? [event.thread_id] : [] },
+      };
+    },
+  }));
+
   return tools;
 }
 

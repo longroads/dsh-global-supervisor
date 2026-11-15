@@ -65,6 +65,11 @@ export class EventRepository {
     return this.db.prepare('SELECT * FROM events WHERE source = ? ORDER BY id DESC LIMIT ?').all(source, limit) as unknown as EventRow[];
   }
 
+  /** 同 Thread 的最近事件（召回用，按 id 倒序）。 */
+  byThread(threadId: string, limit: number): EventRow[] {
+    return this.db.prepare('SELECT * FROM events WHERE thread_id = ? ORDER BY id DESC LIMIT ?').all(threadId, limit) as unknown as EventRow[];
+  }
+
   countByType(type: string): number {
     const row = this.db.prepare('SELECT COUNT(*) AS n FROM events WHERE type = ?').get(type) as { n: number };
     return row.n;
