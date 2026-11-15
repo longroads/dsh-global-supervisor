@@ -24,7 +24,7 @@ import type { ToolsService } from '@deepseek-ai/dsh-tools';
 import type { ProbeCheck, ProbeReport } from './types/index.js';
 
 /** 插件版本（与 package.json 同步维护）。 */
-const PLUGIN_VERSION = '0.4.0';
+const PLUGIN_VERSION = '0.5.0';
 
 /** 单项检查的安全包装：任何抛错都转为 UNAVAILABLE 记录，不中断整体。 */
 async function check(id: string, name: string, body: () => Promise<string>): Promise<ProbeCheck> {
@@ -169,6 +169,29 @@ export async function runProbe(ctx: Context, configuredDir?: string): Promise<Pr
     const raw = im.listBots();
     const bots = Array.isArray(raw) ? raw : [];
     return `listBots() 返回 ${bots.length} 个 bot${bots[0] ? `；示例 id=${bots[0]}` : ''}（返回形态：${Array.isArray(raw) ? 'array' : typeof raw}）；send=${typeof im.send === 'function' ? '存在' : '缺失'}`;
+  }));
+
+  checks.push(await check('service.llm-catalog', 'ctx.llm 存在且目录可枚举（Phase 6 模型校验）', async () => {
+    const llm = (await awaitService(ctx, 'llm', 5, 200)) as { listProviders?: () => unknown; listModels?: (p: string) => Promise<unknown> } | undefined;
+    if (!llm) throw new Error('ctx.llm 未就绪');
+    if (typeof llm.listProviders !== 'function') throw new Error('ctx.llm.listProviders 不是函数');
+    const providers = llm.listProviders() as Array<{ id: string; name?: string }>;
+    if (!Array.isArray(providers)) throw new Error(`listProviders() 返回非数组：${typeof providers}`);
+    let modelCount = -1;
+    if (providers[0] !== undefined && typeof llm.listModels === 'function') {
+      const models = (await llm.listModels(providers[0].id)) as unknown[];
+      modelCount = Array.isArray(models) ? models.length : -1;
+    }
+    return `listProviders() 返回 ${providers.length} 个 provider${providers[0] ? `；示例 ${providers[0].id}` : ''}${modelCount >= 0 ? `；首 provider 模型 ${modelCount} 个` : ''}`;
+  }));
+
+  checks.push(await check('api.agent-model-select', 'Agent.model.select 存在性（Phase 6 模型切换；机会性——无 live Agent 则 SKIPPED）', async () => {
+    const agents = (await awaitService(ctx, 'agents')) as { list?: () => Array<{ model?: { select?: unknown } }> } | undefined;
+    const live = agents?.list?.() ?? [];
+    const first = live[0];
+    if (!first) return 'SKIPPED：当前无 live Agent（首次真实派发/切换时复核）';
+    if (typeof first.model?.select !== 'function') throw new Error('live Agent.model.select 不是函数');
+    return `live Agent ${live.length} 个；model.select 为函数（未调用——探针只读）`;
   }));
 
   // --- 关键 API 形态 ---
