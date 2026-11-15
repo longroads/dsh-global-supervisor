@@ -219,6 +219,14 @@ export const MIGRATIONS: readonly Migration[] = [
       ALTER TABLE tasks ADD COLUMN channel_ref TEXT;
     `,
   },
+  {
+    version: 7,
+    name: 'model-prefs',
+    up: `
+      ALTER TABLE projects ADD COLUMN model_pref_json TEXT;
+      ALTER TABLE tasks ADD COLUMN model_pref_json TEXT;
+    `,
+  },
 ];
 
 /** 迁移执行器：按 version 升序应用未执行的迁移，每条独立事务。 */

@@ -75,6 +75,7 @@ export interface ProjectRow {
   status: ProjectStatus;
   worker_session_id: string | null;
   goals_json: string;
+  model_pref_json: string | null;
   health: ProjectHealth;
   last_review_at: string | null;
   next_review_at: string | null;
@@ -97,6 +98,7 @@ export interface TaskRow {
   channel_ref: string | null;
   retry_count: number;
   max_retries: number;
+  model_pref_json: string | null;
   timeout_at: string | null;
   due_at: string | null;
   last_report_at: string | null;

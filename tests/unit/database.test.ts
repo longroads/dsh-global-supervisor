@@ -33,8 +33,8 @@ describe('数据库连接与迁移', async () => {
     db1.close();
     const db2 = await openDatabase(path);
     const row = db2.prepare('SELECT COUNT(*) AS n, MAX(version) AS v FROM schema_version').get() as { n: number; v: number };
-    expect(row.n).toBe(6);
-    expect(row.v).toBeGreaterThanOrEqual(6);
+    expect(row.n).toBe(7);
+    expect(row.v).toBeGreaterThanOrEqual(7);
     db2.close();
   });
 
@@ -91,6 +91,21 @@ describe('TaskRepository', async () => {
     expect(second).not.toBe(first);
     expect(second.slice(0, -3)).toBe(first.slice(0, -3));
     expect(Number(second.slice(-3))).toBe(Number(first.slice(-3)) + 1);
+    db.close();
+  });
+
+  it('模型偏好列读写（迁移 v7）：task 写入/清除，project 经 update 写入', async () => {
+    const db = await openDatabase(':memory:');
+    const projects = new ProjectRepository(db);
+    const tasks = new TaskRepository(db);
+    projects.create({ id: 'proj-1', workspaceId: 'ws-1', name: 'P1' });
+    tasks.create({ id: 'task-1', projectId: 'proj-1', title: 'T' });
+    expect(tasks.setModelPref('task-1', '{"provider":"p1","model":"m1"}')).toBe(true);
+    expect(tasks.byId('task-1')?.model_pref_json).toBe('{"provider":"p1","model":"m1"}');
+    tasks.setModelPref('task-1', null);
+    expect(tasks.byId('task-1')?.model_pref_json).toBeNull();
+    projects.update('proj-1', { modelPrefJson: '{"provider":"p1","model":"m2"}' });
+    expect(projects.byId('proj-1')?.model_pref_json).toBe('{"provider":"p1","model":"m2"}');
     db.close();
   });
 

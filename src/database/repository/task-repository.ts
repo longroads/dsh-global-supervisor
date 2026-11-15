@@ -104,6 +104,12 @@ export class TaskRepository {
     this.db.prepare('UPDATE tasks SET retry_count = retry_count + 1, updated_at = ? WHERE id = ?').run(now(), id);
   }
 
+  /** 写任务级模型偏好（null 清除）。 */
+  setModelPref(id: string, modelPrefJson: string | null): boolean {
+    const result = this.db.prepare('UPDATE tasks SET model_pref_json = ?, updated_at = ? WHERE id = ?').run(modelPrefJson, now(), id);
+    return result.changes > 0;
+  }
+
   /** 依赖登记（自引用在 D CHECK 层拒绝；环路检测在 TaskManager）。 */
   addDependency(taskId: string, dependsOnTaskId: string): void {
     this.db

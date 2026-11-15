@@ -53,6 +53,7 @@ export class ProjectRepository {
       status?: ProjectStatus;
       workerSessionId?: string | null;
       goalsJson?: string;
+      modelPrefJson?: string | null;
       health?: ProjectHealth;
       lastReviewAt?: string | null;
       nextReviewAt?: string | null;
@@ -66,6 +67,7 @@ export class ProjectRepository {
     if (patch.status !== undefined) { sets.push('status = ?'); params.push(patch.status); }
     if (patch.workerSessionId !== undefined) { sets.push('worker_session_id = ?'); params.push(patch.workerSessionId); }
     if (patch.goalsJson !== undefined) { sets.push('goals_json = ?'); params.push(patch.goalsJson); }
+    if (patch.modelPrefJson !== undefined) { sets.push('model_pref_json = ?'); params.push(patch.modelPrefJson); }
     if (patch.health !== undefined) { sets.push('health = ?'); params.push(patch.health); }
     if (patch.lastReviewAt !== undefined) { sets.push('last_review_at = ?'); params.push(patch.lastReviewAt); }
     if (patch.nextReviewAt !== undefined) { sets.push('next_review_at = ?'); params.push(patch.nextReviewAt); }
