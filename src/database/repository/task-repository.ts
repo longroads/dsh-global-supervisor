@@ -42,11 +42,12 @@ export class TaskRepository {
     maxRetries?: number;
     dueAt?: string;
     scheduleBindingId?: string;
+    sourceEventId?: string;
   }): void {
     this.db
       .prepare(
-        `INSERT INTO tasks(id, project_id, parent_task_id, title, description, priority, status, schedule_binding_id, max_retries, due_at, created_at, updated_at)
-         VALUES(?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?)`,
+        `INSERT INTO tasks(id, project_id, parent_task_id, title, description, priority, status, schedule_binding_id, source_event_id, max_retries, due_at, created_at, updated_at)
+         VALUES(?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         input.id,
@@ -56,6 +57,7 @@ export class TaskRepository {
         input.description ?? '',
         input.priority ?? 3,
         input.scheduleBindingId ?? null,
+        input.sourceEventId ?? null,
         input.maxRetries ?? 2,
         input.dueAt ?? null,
         now(),

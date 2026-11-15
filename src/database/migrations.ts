@@ -198,6 +198,20 @@ export const MIGRATIONS: readonly Migration[] = [
       );
     `,
   },
+  {
+    version: 5,
+    name: 'thread-subscriptions',
+    up: `
+      CREATE TABLE thread_subscriptions (
+        task_id TEXT NOT NULL REFERENCES tasks(id),
+        thread_id TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (task_id, thread_id)
+      );
+      CREATE INDEX idx_thread_subscriptions_thread ON thread_subscriptions(thread_id);
+      ALTER TABLE tasks ADD COLUMN source_event_id TEXT;
+    `,
+  },
 ];
 
 /** 迁移执行器：按 version 升序应用未执行的迁移，每条独立事务。 */

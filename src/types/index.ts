@@ -93,6 +93,7 @@ export interface TaskRow {
   status: TaskStatus;
   assigned_session_id: string | null;
   schedule_binding_id: string | null;
+  source_event_id: string | null;
   retry_count: number;
   max_retries: number;
   timeout_at: string | null;

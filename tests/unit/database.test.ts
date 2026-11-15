@@ -7,6 +7,7 @@ import { EventRepository } from '../../src/database/repository/event-repository.
 import { ProjectRepository } from '../../src/database/repository/project-repository.js';
 import { TaskRepository } from '../../src/database/repository/task-repository.js';
 import { TaskRunRepository } from '../../src/database/repository/task-run-repository.js';
+import { ThreadSubscriptionRepository } from '../../src/database/repository/thread-subscription-repository.js';
 
 let tmpDir: string;
 
@@ -32,8 +33,8 @@ describe('数据库连接与迁移', async () => {
     db1.close();
     const db2 = await openDatabase(path);
     const row = db2.prepare('SELECT COUNT(*) AS n, MAX(version) AS v FROM schema_version').get() as { n: number; v: number };
-    expect(row.n).toBe(4);
-    expect(row.v).toBeGreaterThanOrEqual(4);
+    expect(row.n).toBe(5);
+    expect(row.v).toBeGreaterThanOrEqual(5);
     db2.close();
   });
 
@@ -123,6 +124,18 @@ describe('TaskRepository', async () => {
     expect(() => tasks.addDependency('task-1', 'task-1')).toThrow();
     db.close();
   });
+
+  it('source_event_id 落库（缺省为 null）', async () => {
+    const db = await openDatabase(':memory:');
+    const projects = new ProjectRepository(db);
+    const tasks = new TaskRepository(db);
+    projects.create({ id: 'proj-1', workspaceId: 'ws-1', name: 'P1' });
+    tasks.create({ id: 'task-1', projectId: 'proj-1', title: 'T', sourceEventId: 'wh-9' });
+    tasks.create({ id: 'task-2', projectId: 'proj-1', title: 'T2' });
+    expect(tasks.byId('task-1')?.source_event_id).toBe('wh-9');
+    expect(tasks.byId('task-2')?.source_event_id).toBeNull();
+    db.close();
+  });
 });
 
 describe('TaskRunRepository', async () => {
@@ -156,6 +169,65 @@ describe('EventRepository 去重', async () => {
     expect(second).toBe(false);
     expect(events.byEventId('sched-occ-001')).toBeDefined();
     expect(events.countByType('schedule.fired')).toBe(1);
+    db.close();
+  });
+});
+
+describe('ThreadSubscriptionRepository', async () => {
+  it('订阅幂等、外键拒绝孤儿任务、按任务退订清空', async () => {
+    const db = await openDatabase(':memory:');
+    const projects = new ProjectRepository(db);
+    const tasks = new TaskRepository(db);
+    const subs = new ThreadSubscriptionRepository(db);
+    projects.create({ id: 'proj-1', workspaceId: 'ws-1', name: 'P1' });
+    tasks.create({ id: 'task-1', projectId: 'proj-1', title: 'T' });
+    expect(() => subs.subscribe('task-1', 'th-x')).not.toThrow();
+    expect(() => subs.subscribe('task-1', 'th-x')).not.toThrow();
+    expect(subs.threadsOfTask('task-1')).toEqual(['th-x']);
+    expect(() => subs.subscribe('task-orphan', 'th-x')).toThrow();
+    subs.unsubscribeByTask('task-1');
+    expect(subs.threadsOfTask('task-1')).toEqual([]);
+    db.close();
+  });
+
+  it('runningSubscribers 只含 running 且已订阅的任务（pending 与未订阅均排除）', async () => {
+    const db = await openDatabase(':memory:');
+    const projects = new ProjectRepository(db);
+    const tasks = new TaskRepository(db);
+    const subs = new ThreadSubscriptionRepository(db);
+    projects.create({ id: 'proj-1', workspaceId: 'ws-1', name: 'P1' });
+    tasks.create({ id: 'task-1', projectId: 'proj-1', title: 'T1' });
+    tasks.create({ id: 'task-2', projectId: 'proj-1', title: 'T2' });
+    tasks.create({ id: 'task-3', projectId: 'proj-1', title: 'T3' });
+    tasks.updateStatus('task-1', 'queued');
+    tasks.updateStatus('task-1', 'running');
+    tasks.markDispatched('task-1', 'session-a', '2026-11-15T12:00:00.000Z');
+    tasks.updateStatus('task-3', 'queued');
+    tasks.updateStatus('task-3', 'running');
+    tasks.markDispatched('task-3', 'session-c', '2026-11-15T12:00:00.000Z');
+    subs.subscribe('task-1', 'th-x');
+    subs.subscribe('task-2', 'th-x');
+    const subscribers = subs.runningSubscribers('th-x');
+    expect(subscribers).toHaveLength(1);
+    expect(subscribers[0]?.task_id).toBe('task-1');
+    expect(subscribers[0]?.assigned_session_id).toBe('session-a');
+    db.close();
+  });
+
+  it('running 但未派发的订阅者 assigned_session_id 为 null（不滤除）', async () => {
+    const db = await openDatabase(':memory:');
+    const projects = new ProjectRepository(db);
+    const tasks = new TaskRepository(db);
+    const subs = new ThreadSubscriptionRepository(db);
+    projects.create({ id: 'proj-1', workspaceId: 'ws-1', name: 'P1' });
+    tasks.create({ id: 'task-4', projectId: 'proj-1', title: 'T4' });
+    tasks.updateStatus('task-4', 'queued');
+    tasks.updateStatus('task-4', 'running');
+    subs.subscribe('task-4', 'th-y');
+    const subscribers = subs.runningSubscribers('th-y');
+    expect(subscribers).toHaveLength(1);
+    expect(subscribers[0]?.task_id).toBe('task-4');
+    expect(subscribers[0]?.assigned_session_id).toBeNull();
     db.close();
   });
 });
