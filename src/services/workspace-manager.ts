@@ -38,6 +38,7 @@ export interface WorkspaceOverviewItem {
   workspaceId: string;
   path: string;
   title: string;
+  description: string;
   status: string;
   health: ProjectHealth;
   priority: number;
@@ -92,9 +93,9 @@ export class WorkspaceManager {
       const row = byWorkspace.get(workspace.id);
       if (row) {
         const view = this.toView(row, workspace);
-        items.push({ managed: true, projectId: view.projectId, workspaceId: view.workspaceId, path: view.workspacePath, title: view.title, status: view.status, health: view.health, priority: view.priority, workerSessionId: view.workerSessionId, sessionCount: view.sessionCount, sessionIds: workspace.sessionIds });
+        items.push({ managed: true, projectId: view.projectId, workspaceId: view.workspaceId, path: view.workspacePath, title: view.title, description: view.description, status: view.status, health: view.health, priority: view.priority, workerSessionId: view.workerSessionId, sessionCount: view.sessionCount, sessionIds: workspace.sessionIds });
       } else {
-        items.push({ managed: false, workspaceId: workspace.id, path: workspace.path, title: workspace.title, status: 'unmanaged', health: 'unknown', priority: 0, workerSessionId: null, sessionCount: workspace.sessionIds.length, sessionIds: workspace.sessionIds });
+        items.push({ managed: false, workspaceId: workspace.id, path: workspace.path, title: workspace.title, description: '', status: 'unmanaged', health: 'unknown', priority: 0, workerSessionId: null, sessionCount: workspace.sessionIds.length, sessionIds: workspace.sessionIds });
       }
     }
     return items;
@@ -129,10 +130,12 @@ export class WorkspaceManager {
   }
 
   /**
-   * 新建项目：目录须已存在（由调用方/Router 会话的文件工具负责创建目录，
-   * 插件自身不做文件系统写操作）——registry realpath 校验兜底。
+   * 新建项目：目录不存在时自动创建（node:fs 动态导入，遵守顶层零内建静态依赖纪律；
+   * 用户确认流在工具层把关）——registry realpath 校验兜底。
    */
   async createProject(path: string, title: string, opts: { priority?: number; description?: string } = {}): Promise<ProjectView> {
+    const fs = await import('node:fs/promises');
+    await fs.mkdir(path, { recursive: true });
     const existing = await this.adapter.resolveByPath(path);
     if (existing) throw new Error(`路径已注册为 workspace（${existing.id}），请改用纳管`);
     const workspace = await this.adapter.createWorkspace(path, title);

@@ -14,6 +14,7 @@ import { SchedulerService } from '../../src/services/scheduler.js';
 import { SessionDirectNotifier } from '../../src/services/notifier.js';
 import { TaskManager } from '../../src/services/task-manager.js';
 import { WorkspaceManager } from '../../src/services/workspace-manager.js';
+import { RoutingRuleRepository } from '../../src/database/repository/routing-rule-repository.js';
 import type { SupervisorStack } from '../../src/runtime.js';
 import { isGuardDenied, makeTool } from '../../src/tools/toolkit.js';
 import { buildSupervisorTools } from '../../src/tools/supervisor-tools.js';
@@ -27,10 +28,20 @@ function execOf(sessionId: string): ToolRunContext {
   return { agent: { id: sessionId }, signal: new AbortController().signal } as unknown as ToolRunContext;
 }
 
-/** 手工组装服务栈（内存库 + fake ctx，Adapter 不被真正调用）。 */
+/** 手工组装服务栈（内存库 + fake ctx；workspaceRegistry 提供 list/resolveByPath/create 假实现）。 */
 async function buildStack(): Promise<SupervisorStack> {
   const db = await openDatabase(':memory:');
-  const fakeCtx = { get: () => ({}) } as unknown as Context;
+  const workspaces = [{ id: 'ws-1', path: 'E:\\proj\\p1', title: 'P1', sessionIds: [WORKER_SESSION], createdAt: '', updatedAt: '' }];
+  const registry = {
+    list: () => [...workspaces],
+    resolveByPath: async () => undefined,
+    create: async (path: string, title: string) => {
+      const created = { id: 'ws-created', path, title, sessionIds: [] as string[], createdAt: '', updatedAt: '' };
+      workspaces.push(created);
+      return created;
+    },
+  };
+  const fakeCtx = { get: (name: string) => (name === 'workspaceRegistry' ? registry : {}) } as unknown as Context;
   const agentAdapter = new DshAgentAdapter(fakeCtx);
   const taskManager = new TaskManager(db);
   taskManager.projects.create({ id: 'proj-1', workspaceId: 'ws-1', name: 'P1', workerSessionId: WORKER_SESSION });
@@ -46,6 +57,7 @@ async function buildStack(): Promise<SupervisorStack> {
     monitor: new ProjectMonitor(taskManager),
     notifier: new SessionDirectNotifier(agentAdapter, () => ROUTER_SESSION),
     routerIdentity: new RouterIdentity(db, ROUTER_SESSION),
+    routingRules: new RoutingRuleRepository(db),
   };
 }
 
@@ -126,6 +138,63 @@ describe('supervisor 工具权限与任务流', () => {
     const task = stack.taskManager.tasks.byId(taskId);
     expect(task?.status).toBe('pending');
     expect(task?.priority).toBe(7);
+  });
+
+  it('workspace_create 未确认时仅返回预览，不创建项目', async () => {
+    const stack = await buildStack();
+    const tools = buildSupervisorTools(stack);
+    const create = tools.find((t) => t.name === 'supervisor_workspace_create') as ToolDefinition;
+    const result = await create.execute({ path: 'E:\\tmp\\never-created', title: 'NewProj' }, execOf(ROUTER_SESSION));
+    expect((result as { ok: boolean }).ok).toBe(false);
+    expect((result as { preview: boolean }).preview).toBe(true);
+    expect(stack.workspaceManager.projects.list(true).some((p) => p.name === 'NewProj')).toBe(false);
+  });
+
+  it('workspace_create confirmed=true：目录不存在时自动创建并纳管', async () => {
+    const os = await import('node:os');
+    const path = await import('node:path');
+    const fs = await import('node:fs/promises');
+    const dir = path.join(os.tmpdir(), `gs-create-${Date.now()}`);
+    const stack = await buildStack();
+    const tools = buildSupervisorTools(stack);
+    const create = tools.find((t) => t.name === 'supervisor_workspace_create') as ToolDefinition;
+    const result = await create.execute({ path: dir, title: 'AutoDir', confirmed: true }, execOf(ROUTER_SESSION));
+    expect((result as { ok: boolean }).ok).toBe(true);
+    expect((await fs.stat(dir)).isDirectory()).toBe(true);
+    await fs.rm(dir, { recursive: true, force: true });
+  });
+
+  it('task_create 接受 workspace_id 并解析为受管项目', async () => {
+    const stack = await buildStack();
+    const tools = buildSupervisorTools(stack);
+    const create = tools.find((t) => t.name === 'supervisor_task_create') as ToolDefinition;
+    const result = await create.execute({ workspace_id: 'ws-1', title: '按工作区建任务' }, execOf(ROUTER_SESSION));
+    expect((result as { ok: boolean }).ok).toBe(true);
+    expect((result as { task: { project_id: string } }).task.project_id).toBe('proj-1');
+  });
+
+  it('routing_save 保存偏好后 routing_lookup 命中并递增计数', async () => {
+    const stack = await buildStack();
+    const tools = buildSupervisorTools(stack);
+    const save = tools.find((t) => t.name === 'supervisor_routing_save') as ToolDefinition;
+    const lookup = tools.find((t) => t.name === 'supervisor_routing_lookup') as ToolDefinition;
+    const saved = await save.execute({ keyword: 'Kubernetes', workspace_id: 'ws-1', note: 'k8s 给 research' }, execOf(ROUTER_SESSION));
+    expect((saved as { ok: boolean }).ok).toBe(true);
+    expect((saved as { rule: { keyword: string } }).rule.keyword).toBe('kubernetes');
+    const hit = await lookup.execute({ text: '帮我跑个 kubernetes 实验' }, execOf(ROUTER_SESSION));
+    expect((hit as { matched: number }).matched).toBe(1);
+    const rules = (hit as { rules: Array<{ workspace_id: string; hit_count: number }> }).rules;
+    expect(rules[0]?.workspace_id).toBe('ws-1');
+    expect(rules[0]?.hit_count).toBe(1);
+  });
+
+  it('routing_save 指向未纳管 workspace 时拒绝', async () => {
+    const stack = await buildStack();
+    const tools = buildSupervisorTools(stack);
+    const save = tools.find((t) => t.name === 'supervisor_routing_save') as ToolDefinition;
+    const result = await save.execute({ keyword: 'misc', workspace_id: 'ws-999' }, execOf(ROUTER_SESSION));
+    expect((result as { ok: boolean }).ok).toBe(false);
+    expect((result as { error: string }).error).toContain('未纳管');
   });
 });
 

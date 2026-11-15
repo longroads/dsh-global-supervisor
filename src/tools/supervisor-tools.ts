@@ -98,14 +98,25 @@ export function buildSupervisorTools(stack: SupervisorStack): ToolDefinition[] {
 
   tools.push(makeTool({
     name: 'supervisor_workspace_create',
-    description: '新建项目：目录必须已存在（请先用文件工具创建目录），注册为 DSH workspace 并纳管',
-    parameters: OBJ({ path: { type: 'string', description: '已存在的项目目录绝对路径' }, title: { type: 'string' }, priority: { type: 'integer', description: '0-9，默认 3' }, description: { type: 'string' } }, ['path', 'title']),
+    description: '新建项目并纳管。⚠️ 必须先向用户确认（描述项目名与路径，用户明确同意后传 confirmed: true）；未确认时调用只返回预览。目录不存在时插件自动创建。若不确定是否需要新工作区，先调 supervisor_workspace_list 检查能否复用既有项目。',
+    parameters: OBJ({
+      path: { type: 'string', description: '项目目录绝对路径（不存在时自动创建）' },
+      title: { type: 'string' },
+      priority: { type: 'integer', description: '0-9，默认 3' },
+      description: { type: 'string' },
+      confirmed: { type: 'boolean', description: '用户已确认创建；不带此参数时仅返回预览不执行' },
+    }, ['path', 'title']),
     resultSchema: RESULT,
     guard, guardDeniedMessage: DENIED,
     handler: async (args) => {
       const record = asRecord(args);
+      const path = stringArg(record, 'path');
+      const title = stringArg(record, 'title');
+      if (record['confirmed'] !== true) {
+        return { ok: false, preview: true, message: '尚未获得用户确认：请先向用户确认是否创建该工作区（title/path），确认后携带 confirmed: true 重新调用', path, title };
+      }
       try {
-        const project = await stack.workspaceManager.createProject(stringArg(record, 'path'), stringArg(record, 'title'), {
+        const project = await stack.workspaceManager.createProject(path, title, {
           priority: intArg(record, 'priority', 3, 0, 9),
           description: stringArg(record, 'description'),
         });
@@ -150,21 +161,22 @@ export function buildSupervisorTools(stack: SupervisorStack): ToolDefinition[] {
 
   tools.push(makeTool({
     name: 'supervisor_task_create',
-    description: '创建任务（pending 起步，需 supervisor_task_assign 派发；depends_on 为前置任务 ID 数组）',
+    description: '创建任务（pending 起步，需 supervisor_task_assign 派发；depends_on 为前置任务 ID 数组）。project_id 与 workspace_id 二选一——传 workspace_id 时自动解析对应受管项目',
     parameters: OBJ({
-      project_id: { type: 'string' }, title: { type: 'string' }, description: { type: 'string' },
+      project_id: { type: 'string' }, workspace_id: { type: 'string', description: 'DSH workspace ID（与 project_id 二选一）' }, title: { type: 'string' }, description: { type: 'string' },
       priority: { type: 'integer' }, due_at: { type: 'string', description: 'RFC3339 截止时间' },
       depends_on: { type: 'array', items: { type: 'string' } },
-    }, ['project_id', 'title']),
+    }, ['title']),
     resultSchema: RESULT,
     guard, guardDeniedMessage: DENIED,
-    handler: (args, ctx) => {
+    handler: async (args, ctx) => {
       const record = asRecord(args);
       try {
+        const projectId = await resolveProjectId(stack, record);
         const deps = Array.isArray(record['depends_on']) ? (record['depends_on'] as unknown[]).filter((d): d is string => typeof d === 'string') : [];
         const task = stack.taskManager.createTask(
           {
-            projectId: stringArg(record, 'project_id'),
+            projectId,
             title: stringArg(record, 'title'),
             description: stringArg(record, 'description'),
             priority: intArg(record, 'priority', 3, 0, 9),
@@ -325,6 +337,40 @@ export function buildSupervisorTools(stack: SupervisorStack): ToolDefinition[] {
     handler: async () => ({ ok: true, bindings: await stack.scheduler.listBindings() }),
   }));
 
+  tools.push(makeTool({
+    name: 'supervisor_routing_save',
+    description: '保存任务路由偏好：任务描述包含某关键词时自动路由到指定工作区。用户表达"这类任务以后都给 X 执行"时调用；同关键词重复保存为覆盖更新',
+    parameters: OBJ({
+      keyword: { type: 'string', description: '匹配关键词（任务描述包含即命中，忽略大小写）' },
+      workspace_id: { type: 'string', description: '目标 DSH workspace ID' },
+      note: { type: 'string', description: '用户原话或说明（可选，审计用）' },
+    }, ['keyword', 'workspace_id']),
+    resultSchema: RESULT,
+    guard, guardDeniedMessage: DENIED,
+    handler: async (args) => {
+      const record = asRecord(args);
+      const keyword = stringArg(record, 'keyword').trim().toLowerCase();
+      const workspaceId = stringArg(record, 'workspace_id');
+      if (keyword === '') return { ok: false, error: 'keyword 不能为空' };
+      const project = await stack.workspaceManager.projectByWorkspace(workspaceId);
+      if (!project) return { ok: false, error: `workspace 未纳管：${workspaceId}（先 supervisor_workspace_adopt 纳管）` };
+      const rule = await stack.routingRules.save({ keyword, workspaceId, createdBy: 'router', note: optionalStringArg(record, 'note') });
+      return { ok: true, rule };
+    },
+  }));
+
+  tools.push(makeTool({
+    name: 'supervisor_routing_lookup',
+    description: '按任务描述查询路由偏好（创建任务前调用：命中则直接使用返回的 workspace_id 对应项目）',
+    parameters: OBJ({ text: { type: 'string', description: '任务描述文本' } }, ['text']),
+    resultSchema: RESULT,
+    guard, guardDeniedMessage: DENIED,
+    handler: (args) => {
+      const rules = stack.routingRules.lookupAndRecord(stringArg(asRecord(args), 'text'));
+      return { ok: true, matched: rules.length, rules };
+    },
+  }));
+
   return tools;
 }
 
@@ -358,4 +404,15 @@ async function reviewProject(
   return dispatch.dispatched
     ? { ok: true, reason: 'dispatched', task_id: task.id }
     : { ok: false, reason: dispatch.reason, task_id: task.id };
+}
+
+/** 解析任务归属项目：project_id 优先，否则按 workspace_id 解析受管项目。 */
+async function resolveProjectId(stack: SupervisorStack, record: Record<string, unknown>): Promise<string> {
+  const projectId = optionalStringArg(record, 'project_id');
+  if (projectId !== undefined) return projectId;
+  const workspaceId = optionalStringArg(record, 'workspace_id');
+  if (workspaceId === undefined) throw new Error('project_id 与 workspace_id 至少提供一个');
+  const project = await stack.workspaceManager.projectByWorkspace(workspaceId);
+  if (!project) throw new Error(`workspace 未纳管：${workspaceId}（先 supervisor_workspace_adopt 纳管）`);
+  return project.projectId;
 }

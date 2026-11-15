@@ -50,3 +50,32 @@ describe('WorkspaceManager 全量概览', () => {
     expect(gamma?.sessionCount).toBe(1);
   });
 });
+
+describe('WorkspaceManager 描述字段与自动建目录', () => {
+  it('listWorkspaceOverview 行携带 description（受管取项目描述，未纳管为空）', async () => {
+    const registry = { list: () => [ws('ws-1', 'alpha'), ws('ws-4', 'delta')] };
+    const db = await openDatabase(':memory:');
+    const manager = new WorkspaceManager(new DshWorkspaceAdapter(fakeCtx(registry)), db);
+    manager.projects.create({ id: 'proj-1', workspaceId: 'ws-1', name: 'alpha', description: 'K8s 调研项目' });
+    const overview = await manager.listWorkspaceOverview();
+    expect(overview.find((item) => item.workspaceId === 'ws-1')?.description).toBe('K8s 调研项目');
+    expect(overview.find((item) => item.workspaceId === 'ws-4')?.description).toBe('');
+    db.close();
+  });
+
+  it('createProject 目录不存在时自动创建', async () => {
+    const os = await import('node:os');
+    const path = await import('node:path');
+    const fs = await import('node:fs/promises');
+    const dir = path.join(os.tmpdir(), `gs-mkdir-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`);
+    const created = { id: 'ws-new', path: dir, title: 'AutoProj', sessionIds: [] as string[], createdAt: '', updatedAt: '' };
+    const registry = { list: () => [created], resolveByPath: async () => undefined, create: async () => created };
+    const db = await openDatabase(':memory:');
+    const manager = new WorkspaceManager(new DshWorkspaceAdapter(fakeCtx(registry)), db);
+    const project = await manager.createProject(dir, 'AutoProj', { description: '自动建目录验证' });
+    expect(project.workspaceId).toBe('ws-new');
+    expect((await fs.stat(dir)).isDirectory()).toBe(true);
+    await fs.rm(dir, { recursive: true, force: true });
+    db.close();
+  });
+});
