@@ -11,6 +11,7 @@ import { EventRepository } from '../database/repository/event-repository.js';
 import { ProjectRepository } from '../database/repository/project-repository.js';
 import { TaskRepository } from '../database/repository/task-repository.js';
 import { TaskRunRepository } from '../database/repository/task-run-repository.js';
+import { ThreadSubscriptionRepository } from '../database/repository/thread-subscription-repository.js';
 import { WorkerReportRepository } from '../database/repository/worker-report-repository.js';
 import type { WorkerReport } from '../protocols/worker-report.js';
 import { targetStatusOf } from '../protocols/worker-report.js';
@@ -56,6 +57,8 @@ export interface CreateTaskInput {
   dependsOn?: string[];
   maxRetries?: number;
   dueAt?: string;
+  /** 来源事件 ID（存在且带 thread_id 时自动订阅其 Thread，供事件直通） */
+  sourceEventId?: string;
 }
 
 /** TaskManager 服务（纯逻辑，DSH 交互由上层 AgentController 负责）。 */
@@ -66,6 +69,7 @@ export class TaskManager {
   readonly reports: WorkerReportRepository;
   readonly audit: AuditRepository;
   readonly events: EventRepository;
+  readonly threadSubs: ThreadSubscriptionRepository;
 
   constructor(private readonly db: DatabaseSync) {
     this.tasks = new TaskRepository(db);
@@ -74,6 +78,7 @@ export class TaskManager {
     this.reports = new WorkerReportRepository(db);
     this.audit = new AuditRepository(db);
     this.events = new EventRepository(db);
+    this.threadSubs = new ThreadSubscriptionRepository(db);
   }
 
   /** 创建任务（pending 起步），含依赖登记与环路检测。 */
@@ -82,6 +87,7 @@ export class TaskManager {
       this.assertNoCycle(input.dependsOn, input.parentTaskId);
     }
     const id = this.tasks.nextTaskId();
+    const sourceEvent = input.sourceEventId !== undefined ? this.events.byEventId(input.sourceEventId) : undefined;
     withTransaction(this.db, () => {
       this.tasks.create({
         id,
@@ -92,11 +98,22 @@ export class TaskManager {
         parentTaskId: input.parentTaskId,
         maxRetries: input.maxRetries,
         dueAt: input.dueAt,
+        sourceEventId: input.sourceEventId,
       });
       for (const dep of input.dependsOn ?? []) {
         this.tasks.addDependency(id, dep);
       }
-      this.audit.log({ actorSessionId: actor.sessionId, actorRole: actor.role, action: 'task.create', targetType: 'task', targetId: id });
+      if (sourceEvent?.thread_id) {
+        this.threadSubs.subscribe(id, sourceEvent.thread_id);
+      }
+      this.audit.log({
+        actorSessionId: actor.sessionId,
+        actorRole: actor.role,
+        action: 'task.create',
+        targetType: 'task',
+        targetId: id,
+        detailJson: JSON.stringify({ sourceEventId: input.sourceEventId ?? null, threadId: sourceEvent?.thread_id ?? null }),
+      });
     });
     return this.tasks.byId(id) as TaskRow;
   }
@@ -187,6 +204,9 @@ export class TaskManager {
         });
       }
       this.reports.markApplied(reportId);
+      if (target === 'completed') {
+        this.threadSubs.unsubscribeByTask(report.taskId);
+      }
       this.refreshProjectHealth(task.project_id, target, report.needHuman);
       this.audit.log({
         actorSessionId: callerSessionId,
@@ -227,6 +247,7 @@ export class TaskManager {
       if (openRun) {
         this.runs.finish(openRun.id, 'canceled');
       }
+      this.threadSubs.unsubscribeByTask(taskId);
       this.audit.log({ actorSessionId: actor.sessionId, actorRole: actor.role, action: 'task.cancel', targetType: 'task', targetId: taskId });
     });
     return this.tasks.byId(taskId) as TaskRow;

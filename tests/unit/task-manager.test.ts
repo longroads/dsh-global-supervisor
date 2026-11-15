@@ -173,3 +173,75 @@ describe('TaskManager 任务生命周期', async () => {
     db.close();
   });
 });
+
+describe('TaskManager Thread 订阅生命周期', () => {
+  it('来源事件带 thread_id：创建任务自动订阅其 Thread', async () => {
+    const { manager, db } = await setup();
+    manager.events.ingest({ eventId: 'wh-1', source: 'webhook', type: 'issue.opened', threadId: 'th-1' });
+    const task = manager.createTask({ projectId: 'proj-1', title: 'T', sourceEventId: 'wh-1' }, ROUTER);
+    expect(task.source_event_id).toBe('wh-1');
+    expect(manager.threadSubs.threadsOfTask(task.id)).toEqual(['th-1']);
+    db.close();
+  });
+
+  it('来源事件无 thread_id：任务照常创建但不订阅', async () => {
+    const { manager, db } = await setup();
+    manager.events.ingest({ eventId: 'wh-2', source: 'webhook', type: 'issue.opened' });
+    const task = manager.createTask({ projectId: 'proj-1', title: 'T', sourceEventId: 'wh-2' }, ROUTER);
+    expect(task.status).toBe('pending');
+    expect(manager.threadSubs.threadsOfTask(task.id)).toEqual([]);
+    db.close();
+  });
+
+  it('来源事件不存在：任务照常创建且不订阅（不报错）', async () => {
+    const { manager, db } = await setup();
+    const task = manager.createTask({ projectId: 'proj-1', title: 'T', sourceEventId: 'wh-missing' }, ROUTER);
+    expect(task.status).toBe('pending');
+    expect(task.source_event_id).toBe('wh-missing');
+    expect(manager.threadSubs.threadsOfTask(task.id)).toEqual([]);
+    db.close();
+  });
+
+  it('任务完成：Thread 订阅自动退订', async () => {
+    const { manager, db } = await setup();
+    manager.events.ingest({ eventId: 'wh-1', source: 'webhook', type: 'issue.opened', threadId: 'th-1' });
+    const task = manager.createTask({ projectId: 'proj-1', title: 'T', sourceEventId: 'wh-1' }, ROUTER);
+    manager.enqueue(task.id, ROUTER);
+    manager.markDispatched(task.id, WORKER, null);
+    const outcome = manager.applyWorkerReport(
+      parseWorkerReport({ workspace_id: 'ws-1', task_id: task.id, status: 'completed' }),
+      WORKER,
+    );
+    expect(outcome.taskStatus).toBe('completed');
+    expect(manager.threadSubs.threadsOfTask(task.id)).toEqual([]);
+    db.close();
+  });
+
+  it('任务失败：订阅保留（failed 可重试，重试后仍跟随同一 Thread）', async () => {
+    const { manager, db } = await setup();
+    manager.events.ingest({ eventId: 'wh-1', source: 'webhook', type: 'issue.opened', threadId: 'th-1' });
+    const task = manager.createTask({ projectId: 'proj-1', title: 'T', sourceEventId: 'wh-1' }, ROUTER);
+    manager.enqueue(task.id, ROUTER);
+    manager.markDispatched(task.id, WORKER, null);
+    manager.applyWorkerReport(
+      parseWorkerReport({ workspace_id: 'ws-1', task_id: task.id, status: 'failed' }),
+      WORKER,
+    );
+    expect(manager.tasks.byId(task.id)?.status).toBe('failed');
+    expect(manager.threadSubs.threadsOfTask(task.id)).toEqual(['th-1']);
+    manager.retry(task.id, ROUTER);
+    manager.markDispatched(task.id, WORKER, null);
+    expect(manager.threadSubs.threadsOfTask(task.id)).toEqual(['th-1']);
+    db.close();
+  });
+
+  it('任务取消：Thread 订阅自动退订', async () => {
+    const { manager, db } = await setup();
+    manager.events.ingest({ eventId: 'wh-1', source: 'webhook', type: 'issue.opened', threadId: 'th-1' });
+    const task = manager.createTask({ projectId: 'proj-1', title: 'T', sourceEventId: 'wh-1' }, ROUTER);
+    manager.cancel(task.id, ROUTER);
+    expect(manager.tasks.byId(task.id)?.status).toBe('canceled');
+    expect(manager.threadSubs.threadsOfTask(task.id)).toEqual([]);
+    db.close();
+  });
+});
