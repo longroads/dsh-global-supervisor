@@ -59,6 +59,12 @@ export class EventRepository {
     return this.db.prepare('SELECT * FROM events ORDER BY id DESC LIMIT ?').all(limit) as unknown as EventRow[];
   }
 
+  /** 按来源过滤的最近事件（source 缺省不过滤）。 */
+  listFiltered(source: string | undefined, limit: number): EventRow[] {
+    if (source === undefined) return this.listRecent(limit);
+    return this.db.prepare('SELECT * FROM events WHERE source = ? ORDER BY id DESC LIMIT ?').all(source, limit) as unknown as EventRow[];
+  }
+
   countByType(type: string): number {
     const row = this.db.prepare('SELECT COUNT(*) AS n FROM events WHERE type = ?').get(type) as { n: number };
     return row.n;

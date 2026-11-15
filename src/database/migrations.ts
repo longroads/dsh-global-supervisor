@@ -182,6 +182,22 @@ export const MIGRATIONS: readonly Migration[] = [
       CREATE INDEX idx_routing_keyword ON routing_rules(keyword);
     `,
   },
+  {
+    version: 4,
+    name: 'event-routing-rules',
+    up: `
+      CREATE TABLE event_routing_rules (
+        id TEXT PRIMARY KEY,
+        source_pattern TEXT NOT NULL UNIQUE,
+        action TEXT NOT NULL CHECK (action IN ('route_to_router', 'route_to_worker', 'ignore', 'observe')),
+        target_session_id TEXT,
+        description TEXT NOT NULL DEFAULT '',
+        enabled INTEGER NOT NULL DEFAULT 1,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+    `,
+  },
 ];
 
 /** 迁移执行器：按 version 升序应用未执行的迁移，每条独立事务。 */
