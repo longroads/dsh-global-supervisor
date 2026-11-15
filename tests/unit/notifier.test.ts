@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { Context } from '@deepseek-ai/cordis';
 import { DshImNotifierAdapter } from '../../src/adapters/dsh-im-notifier.js';
 import { NotifierService } from '../../src/services/notifier.js';
@@ -119,5 +119,64 @@ describe('NotifierService 通知路由层', () => {
     expect(seen[0]).toBe('【通知】 a');
     expect(seen[1]).toBe('【警告】 b');
     expect(seen[2]).toBe('【严重】 c');
+  });
+});
+
+describe('NotifierService IM 退避重试（Phase 6 6-C）', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('warning IM 失败：即时降级会话 + 60s 后补发一次成功即止', async () => {
+    vi.useFakeTimers();
+    const session: string[] = [];
+    let imFail = true;
+    let imCalls = 0;
+    const service = new NotifierService(
+      { notify: async (message) => { session.push(message); return true; } },
+      {
+        notify: async (message: string) => {
+          imCalls += 1;
+          if (imFail) throw new Error('bot 离线');
+          session.push(`im:${message}`);
+          return true;
+        },
+      },
+      { type: 'dsh-im', botId: 'bot-1', targetId: 't-1' },
+    );
+    expect(await service.notify('升级', 'warning')).toBe(true);
+    expect(session).toHaveLength(1);
+    expect(service.pendingRetries()).toBe(1);
+    imFail = false;
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(imCalls).toBe(2);
+    expect(service.pendingRetries()).toBe(0);
+    expect(session.some((m) => m.startsWith('im:'))).toBe(true);
+    service.stop();
+  });
+
+  it('info IM 失败不重试；持续失败重试耗尽后出队', async () => {
+    vi.useFakeTimers();
+    const session: string[] = [];
+    let imCalls = 0;
+    const service = new NotifierService(
+      { notify: async (message) => { session.push(message); return true; } },
+      {
+        notify: async () => {
+          imCalls += 1;
+          return false;
+        },
+      },
+      { type: 'dsh-im', botId: 'bot-1', targetId: 't-1' },
+    );
+    await service.notify('轻通知', 'info');
+    expect(service.pendingRetries()).toBe(0);
+
+    expect(await service.notify('升级', 'critical')).toBe(true);
+    await vi.advanceTimersByTimeAsync(60_000);
+    await vi.advanceTimersByTimeAsync(300_000);
+    expect(imCalls).toBe(3);
+    expect(service.pendingRetries()).toBe(0);
+    service.stop();
   });
 });
