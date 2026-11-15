@@ -4,6 +4,7 @@
  */
 import type { Context } from '@deepseek-ai/cordis';
 import { DshAgentAdapter } from './adapters/dsh-agent.js';
+import { DshImNotifierAdapter } from './adapters/dsh-im-notifier.js';
 import { DshScheduleAdapter } from './adapters/dsh-schedule.js';
 import { DshSessionAdapter } from './adapters/dsh-session.js';
 import { DshWorkspaceAdapter } from './adapters/dsh-workspace.js';
@@ -15,7 +16,8 @@ import { ProjectMonitor } from './services/project-monitor.js';
 import { RouterIdentity } from './services/router-identity.js';
 import { RoutingRuleRepository } from './database/repository/routing-rule-repository.js';
 import { SchedulerService } from './services/scheduler.js';
-import { SessionDirectNotifier } from './services/notifier.js';
+import { NotifierService, SessionDirectNotifier } from './services/notifier.js';
+import type { NotifierConfig } from './services/notifier.js';
 import { TaskManager } from './services/task-manager.js';
 import { WorkspaceManager } from './services/workspace-manager.js';
 
@@ -31,7 +33,7 @@ export interface SupervisorStack {
   eventRouter: EventRouter;
   sessionAdapter: DshSessionAdapter;
   monitor: ProjectMonitor;
-  notifier: SessionDirectNotifier;
+  notifier: NotifierService;
   routerIdentity: RouterIdentity;
   routingRules: RoutingRuleRepository;
 }
@@ -40,7 +42,7 @@ export interface SupervisorStack {
 const DB_FILENAME = 'supervisor.db';
 
 /** 组装服务栈（打开数据库并完成迁移）。 */
-export async function createStack(ctx: Context, options: { dataDir?: string; routerSessionId?: string }): Promise<SupervisorStack> {
+export async function createStack(ctx: Context, options: { dataDir?: string; routerSessionId?: string; notifier?: NotifierConfig }): Promise<SupervisorStack> {
   const dataDir = await resolveDataDir(options.dataDir);
   const { openDatabase } = await import('./database/connection.js');
   const { join } = await import('node:path');
@@ -61,7 +63,12 @@ export async function createStack(ctx: Context, options: { dataDir?: string; rou
     const workspace = await workspaceAdapter.getWorkspace(workspaceId);
     return workspace?.sessionIds.includes(sessionId) ?? false;
   });
-  const notifier = new SessionDirectNotifier(agentAdapter, () => routerIdentity.ownerSessionId());
+  const sessionNotifier = new SessionDirectNotifier(agentAdapter, () => routerIdentity.ownerSessionId());
+  const notifier = new NotifierService(sessionNotifier, new DshImNotifierAdapter(ctx), {
+    type: options.notifier?.type === 'dsh-im' ? 'dsh-im' : 'session',
+    botId: options.notifier?.botId ?? '',
+    targetId: options.notifier?.targetId ?? 'supervisor-alerts',
+  });
   const eventRouter = new EventRouter(db, agentAdapter, () => routerIdentity.ownerSessionId());
 
   return {

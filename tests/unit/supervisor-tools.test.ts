@@ -11,7 +11,7 @@ import { EventManager } from '../../src/services/event-manager.js';
 import { ProjectMonitor } from '../../src/services/project-monitor.js';
 import { RouterIdentity } from '../../src/services/router-identity.js';
 import { SchedulerService } from '../../src/services/scheduler.js';
-import { SessionDirectNotifier } from '../../src/services/notifier.js';
+import { SessionDirectNotifier, NotifierService } from '../../src/services/notifier.js';
 import { TaskManager } from '../../src/services/task-manager.js';
 import { WorkspaceManager } from '../../src/services/workspace-manager.js';
 import { EventRouter } from '../../src/services/event-router.js';
@@ -57,7 +57,11 @@ async function buildStack(): Promise<SupervisorStack> {
     eventManager: new EventManager(db),
     sessionAdapter: new DshSessionAdapter(fakeCtx),
     monitor: new ProjectMonitor(taskManager),
-    notifier: new SessionDirectNotifier(agentAdapter, () => ROUTER_SESSION),
+    notifier: new NotifierService(
+      new SessionDirectNotifier(agentAdapter, () => ROUTER_SESSION),
+      { notify: async () => false },
+      { type: 'session', botId: '', targetId: '' },
+    ),
     routerIdentity: new RouterIdentity(db, ROUTER_SESSION),
     routingRules: new RoutingRuleRepository(db),
     // 派发目标用空实现替身：工具层测试不依赖真实 Agent 服务（派发失败会降级 pending，掩盖路由结果）

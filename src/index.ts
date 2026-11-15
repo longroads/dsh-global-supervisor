@@ -31,6 +31,13 @@ interface EventsConfig {
   redactPatterns: boolean;
 }
 
+/** 通知路由配置（Phase 4：IM 优先、失败降级 Router 会话）。 */
+interface NotifierOptions {
+  type: 'session' | 'dsh-im';
+  botId: string;
+  targetId: string;
+}
+
 /** 插件配置（结构定义；schema 声明见下方 Config，profile 的 cordis.patch.yml 可覆盖）。 */
 interface PluginConfig {
   probe: boolean;
@@ -38,6 +45,7 @@ interface PluginConfig {
   routerWorkspaceId: string;
   routerSessionId: string;
   events: EventsConfig;
+  notifier: NotifierOptions;
 }
 
 /** 插件配置 schema（schemastery，DSH 插件惯例）。 */
@@ -51,6 +59,11 @@ export const Config = z.object({
     maxEventTextChars: z.number().default(4000).description('Webhook 事件正文截断上限（字符）'),
     redactPatterns: z.boolean().default(true).description('是否启用事件正文凭证脱敏（ghp_/PEM/Bearer/api key）'),
   }).default({ webhookSources: [], maxEventTextChars: 4000, redactPatterns: true }).description('事件接入配置'),
+  notifier: z.object({
+    type: z.string().default('session').description('通知通道：session（仅 Router 会话）| dsh-im（优先 IM，失败降级会话）'),
+    botId: z.string().default('').description('dsh-im 机器人 ID（dsh-im 设置页「复制调用参数」）'),
+    targetId: z.string().default('supervisor-alerts').description('dsh-im 投递目标 ID（需已在 dsh-im 中保存）'),
+  }).default({ type: 'session', botId: '', targetId: 'supervisor-alerts' }).description('通知路由配置'),
 });
 
 /** Cordis 插件名（profile bundles / patch 的定位标识）。 */
@@ -142,7 +155,7 @@ export function apply(ctx: Context, config: PluginConfig): void {
         const { awaitService } = await import('./adapters/host-services.js');
         const tools = await awaitService<{ register: (tool: ToolDefinition) => unknown }>(ctx, 'tools');
         const { createStack } = await import('./runtime.js');
-        const stack = await createStack(ctx, { dataDir: config.dataDir, routerSessionId: config.routerSessionId });
+        const stack = await createStack(ctx, { dataDir: config.dataDir, routerSessionId: config.routerSessionId, notifier: config.notifier });
         // Host 重启存疑恢复（需求说明第八节）：超时窗口已过判 failed/timeout，未过保持 running 待 Worker 汇报
         const recovery = stack.taskManager.recoverFromRestart();
         if (recovery.expiredIds.length > 0 || recovery.pendingIds.length > 0) {
