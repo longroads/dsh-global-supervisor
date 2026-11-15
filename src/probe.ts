@@ -24,7 +24,7 @@ import type { ToolsService } from '@deepseek-ai/dsh-tools';
 import type { ProbeCheck, ProbeReport } from './types/index.js';
 
 /** 插件版本（与 package.json 同步维护）。 */
-const PLUGIN_VERSION = '0.1.0-beta.2';
+const PLUGIN_VERSION = '0.3.0';
 
 /** 单项检查的安全包装：任何抛错都转为 UNAVAILABLE 记录，不中断整体。 */
 async function check(id: string, name: string, body: () => Promise<string>): Promise<ProbeCheck> {
@@ -160,6 +160,15 @@ export async function runProbe(ctx: Context, configuredDir?: string): Promise<Pr
     if (!tools) throw new Error('ctx.tools 未就绪');
     if (typeof tools.register !== 'function') throw new Error('ctx.tools.register 不是函数');
     return 'register(definition, options?) 签名存在';
+  }));
+
+  checks.push(await check('service.dsh-im', 'ctx.dshIm 存在且 listBots() 可调用（Phase 4 主动投递）', async () => {
+    const im = (await awaitService(ctx, 'dshIm', 5, 200)) as { listBots?: () => unknown; send?: unknown } | undefined;
+    if (!im) throw new Error('ctx.dshIm 未就绪（dsh-im 未安装或服务不可达）');
+    if (typeof im.listBots !== 'function') throw new Error('ctx.dshIm.listBots 不是函数');
+    const raw = im.listBots();
+    const bots = Array.isArray(raw) ? raw : [];
+    return `listBots() 返回 ${bots.length} 个 bot${bots[0] ? `；示例 id=${bots[0]}` : ''}（返回形态：${Array.isArray(raw) ? 'array' : typeof raw}）；send=${typeof im.send === 'function' ? '存在' : '缺失'}`;
   }));
 
   // --- 关键 API 形态 ---
