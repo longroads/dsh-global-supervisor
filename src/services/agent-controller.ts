@@ -4,6 +4,7 @@
  * 终态释放经本类包装 applyWorkerReport 实现（工具层唯一入口保证不漏释放）。
  */
 import type { DshAgentAdapter } from '../adapters/dsh-agent.js';
+import type { ModelPrefInput } from '../adapters/dsh-agent.js';
 import type { DatabaseSync } from 'node:sqlite';
 import type { ReleaseHandle } from './model-queue.js';
 import { ModelQueue } from './model-queue.js';
@@ -20,6 +21,24 @@ export interface DispatchResult {
 
 /** 默认执行超时（30 分钟，方案 §5.1 tasks.timeout_at）。 */
 const DEFAULT_TIMEOUT_MS = 30 * 60 * 1000;
+
+/** 解析 model_pref_json（畸形返回 undefined——偏好坏行不阻断派发）。 */
+function parseModelPref(json: string | null | undefined): ModelPrefInput | undefined {
+  if (!json) return undefined;
+  try {
+    const parsed = JSON.parse(json) as { provider?: unknown; model?: unknown; reasoningEffort?: unknown };
+    if (typeof parsed.provider === 'string' && typeof parsed.model === 'string') {
+      return {
+        provider: parsed.provider,
+        model: parsed.model,
+        ...(typeof parsed.reasoningEffort === 'string' ? { reasoningEffort: parsed.reasoningEffort } : {}),
+      };
+    }
+    return undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 export class AgentController {
   private readonly queue: ModelQueue;
@@ -50,7 +69,8 @@ export class AgentController {
     const permit = await this.queue.submit({ id: taskId, priority: task.priority });
     try {
       this.taskManager.markDispatched(taskId, workerSession, new Date(Date.now() + DEFAULT_TIMEOUT_MS).toISOString());
-      await this.agents.dispatch(workerSession, this.buildInstruction(taskId, task.title, task.description));
+      const modelPref = parseModelPref(task.model_pref_json) ?? parseModelPref(project.model_pref_json);
+      await this.agents.dispatch(workerSession, this.buildInstruction(taskId, task.title, task.description), modelPref);
       this.permits.set(taskId, permit);
       return { dispatched: true, reason: 'ok', taskId };
     } catch (error) {
@@ -75,11 +95,24 @@ export class AgentController {
     return outcome;
   }
 
-  /** 运行中纠偏。 */
-  async steerTask(taskId: string, text: string): Promise<boolean> {
+  /** 对 live 会话立即应用模型选择（工具层入口；冷会话返回 false）。 */
+  async applySessionModel(sessionId: string, pref: ModelPrefInput): Promise<boolean> {
+    return this.agents.selectModelNow(sessionId, pref);
+  }
+
+  /** 运行中纠偏（不排队新轮次；下一模型步生效），留审计。 */
+  async steerTask(taskId: string, text: string, actor: { sessionId?: string; role: 'router' | 'worker' | 'system' } = { role: 'system' }): Promise<boolean> {
     const task = this.taskManager.tasks.byId(taskId);
     if (!task?.assigned_session_id) return false;
     await this.agents.steer(task.assigned_session_id, text);
+    this.taskManager.audit.log({
+      actorSessionId: actor.sessionId,
+      actorRole: actor.role,
+      action: 'task.steer',
+      targetType: 'task',
+      targetId: taskId,
+      detailJson: JSON.stringify({ text: text.slice(0, 200) }),
+    });
     return true;
   }
 
