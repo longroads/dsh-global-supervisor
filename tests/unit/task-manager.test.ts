@@ -262,3 +262,25 @@ describe('TaskManager Channel 追踪', () => {
     db.close();
   });
 });
+
+describe('TaskManager 启动超时判定', () => {
+  it('running 任务判 failed（startup-timeout），open run 以 timeout 收尾并留审计', async () => {
+    const { manager, db } = await setup();
+    const task = manager.createTask({ projectId: 'proj-1', title: 'T' }, ROUTER);
+    manager.enqueue(task.id, ROUTER);
+    manager.markDispatched(task.id, WORKER, null);
+    expect(manager.markStartupTimeout(task.id)).toBe(true);
+    expect(manager.tasks.byId(task.id)?.status).toBe('failed');
+    expect(manager.runs.byTask(task.id).some((r) => r.outcome === 'timeout')).toBe(true);
+    expect(manager.audit.byTarget('task', task.id).some((a) => a.action === 'task.startup-timeout')).toBe(true);
+    db.close();
+  });
+
+  it('非 running 任务不判定（幂等安全）', async () => {
+    const { manager, db } = await setup();
+    const task = manager.createTask({ projectId: 'proj-1', title: 'T' }, ROUTER);
+    expect(manager.markStartupTimeout(task.id)).toBe(false);
+    expect(manager.tasks.byId(task.id)?.status).toBe('pending');
+    db.close();
+  });
+});

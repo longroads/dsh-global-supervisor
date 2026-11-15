@@ -239,6 +239,21 @@ export class TaskManager {
     return this.tasks.byId(taskId) as TaskRow;
   }
 
+  /** 启动超时判定：running 任务在启动窗口内无任何汇报 → failed（open run 以 timeout 收尾）。 */
+  markStartupTimeout(taskId: string): boolean {
+    const task = this.tasks.byId(taskId);
+    if (!task || task.status !== 'running') return false;
+    withTransaction(this.db, () => {
+      this.tasks.updateStatus(taskId, 'failed');
+      const openRun = this.runs.byTask(taskId).find((r) => r.ended_at === null);
+      if (openRun) {
+        this.runs.finish(openRun.id, 'timeout', { errorMessage: '启动窗口内无 Worker 汇报（Watchdog starting 分类）' });
+      }
+      this.audit.log({ actorRole: 'system', action: 'task.startup-timeout', targetType: 'task', targetId: taskId });
+    });
+    return true;
+  }
+
   /** 取消：非终态 → canceled，未关闭的执行记录以 canceled 收尾。 */
   cancel(taskId: string, actor: Actor): TaskRow {
     const task = this.requireTask(taskId);

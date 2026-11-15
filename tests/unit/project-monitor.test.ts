@@ -4,7 +4,9 @@ import { openDatabase } from '../../src/database/connection.js';
 import { DshAgentAdapter } from '../../src/adapters/dsh-agent.js';
 import { AgentController } from '../../src/services/agent-controller.js';
 import { ProjectMonitor } from '../../src/services/project-monitor.js';
+import type { WatchdogOptions } from '../../src/services/project-monitor.js';
 import { TaskManager } from '../../src/services/task-manager.js';
+import { parseWorkerReport } from '../../src/protocols/worker-report.js';
 
 const ROUTER = { sessionId: 'session-router', role: 'router' as const };
 const WORKER = 'session-worker-a';
@@ -17,8 +19,8 @@ function futureIso(): string {
   return new Date(Date.now() + 30 * 60_000).toISOString();
 }
 
-/** fake agents 服务：会话为冷（get 返回 undefined → 走 resume 路径）。 */
-function fakeAgentService() {
+/** fake agents 服务：agentPresent=false 时 get 返回 undefined（会话冷/Agent 不存在）。 */
+function fakeAgentService(agentPresent: boolean) {
   const agent = {
     id: WORKER,
     status: 'idle' as const,
@@ -29,19 +31,26 @@ function fakeAgentService() {
     whenIdle: async () => undefined,
   };
   return {
-    get: () => undefined,
+    get: () => (agentPresent ? agent : undefined),
     list: () => [],
     resume: async () => ({ agent }),
   };
 }
 
-async function setup(): Promise<{ monitor: ProjectMonitor; manager: TaskManager; controller: AgentController; db: Awaited<ReturnType<typeof openDatabase>> }> {
+interface Notice {
+  message: string;
+  severity: string;
+}
+
+async function setup(monitorOptions: WatchdogOptions = {}, agentPresent = false): Promise<{ monitor: ProjectMonitor; manager: TaskManager; controller: AgentController; db: Awaited<ReturnType<typeof openDatabase>> }> {
   const db = await openDatabase(':memory:');
-  const fakeCtx = { get: (name: string) => (name === 'agents' ? fakeAgentService() : {}) } as unknown as Context;
+  const fakeCtx = { get: (name: string) => (name === 'agents' ? fakeAgentService(agentPresent) : {}) } as unknown as Context;
   const manager = new TaskManager(db);
   manager.projects.create({ id: 'proj-1', workspaceId: 'ws-1', name: 'P1', workerSessionId: WORKER });
-  const controller = new AgentController(new DshAgentAdapter(fakeCtx), manager, db);
-  return { monitor: new ProjectMonitor(manager, controller), manager, controller, db };
+  const adapter = new DshAgentAdapter(fakeCtx);
+  const controller = new AgentController(adapter, manager, db);
+  const monitor = new ProjectMonitor(manager, controller, undefined, { agents: adapter, ...monitorOptions });
+  return { monitor, manager, controller, db };
 }
 
 function runningTask(manager: TaskManager, timeoutAt: string | null): string {
@@ -53,18 +62,19 @@ function runningTask(manager: TaskManager, timeoutAt: string | null): string {
 
 describe('ProjectMonitor 超时看门狗', () => {
   it('无超时任务时扫描返回空结果', async () => {
-    const { monitor, manager } = await setup();
+    const { monitor, manager } = await setup({ startingTimeoutMs: 60 * 60 * 1000 });
     runningTask(manager, futureIso());
     runningTask(manager, null);
-    const scan = monitor.scanOnce();
+    const scan = await monitor.scanOnce();
     expect(scan.expired).toEqual([]);
     expect(scan.retried).toEqual([]);
+    expect(scan.startupExpired).toEqual([]);
   });
 
   it('超时任务判 failed 并按预算重排（expired → retried → queued）', async () => {
     const { monitor, manager } = await setup();
     const taskId = runningTask(manager, pastIso());
-    const scan = monitor.scanOnce();
+    const scan = await monitor.scanOnce();
     expect(scan.expired).toEqual([taskId]);
     expect(scan.retried).toEqual([taskId]);
     expect(manager.tasks.byId(taskId)?.status).toBe('queued');
@@ -74,13 +84,13 @@ describe('ProjectMonitor 超时看门狗', () => {
   it('重试预算耗尽的任务进 retryExhausted（保持 failed）', async () => {
     const { monitor, manager } = await setup();
     const taskId = runningTask(manager, pastIso());
-    let scan = monitor.scanOnce();
+    let scan = await monitor.scanOnce();
     expect(scan.retried).toEqual([taskId]);
     manager.markDispatched(taskId, WORKER, pastIso());
-    scan = monitor.scanOnce();
+    scan = await monitor.scanOnce();
     expect(scan.retried).toEqual([taskId]);
     manager.markDispatched(taskId, WORKER, pastIso());
-    scan = monitor.scanOnce();
+    scan = await monitor.scanOnce();
     expect(scan.expired).toContain(taskId);
     expect(scan.retryExhausted).toContain(taskId);
     expect(manager.tasks.byId(taskId)?.status).toBe('failed');
@@ -96,7 +106,7 @@ describe('ProjectMonitor 超时看门狗', () => {
     expect(controller.permitsCount()).toBe(1);
     db.prepare('UPDATE tasks SET timeout_at = ? WHERE id = ?').run(pastIso(), task.id);
 
-    const scan = monitor.scanOnce();
+    const scan = await monitor.scanOnce();
     expect(scan.expired).toContain(task.id);
     expect(scan.permitsReleased).toBe(1);
     expect(controller.permitsCount()).toBe(0);
@@ -108,5 +118,84 @@ describe('ProjectMonitor 超时看门狗', () => {
     monitor.start();
     monitor.stop();
     monitor.stop();
+  });
+});
+
+describe('ProjectMonitor 四分类增强（Phase 5-C）', () => {
+  it('starting：启动窗口内无汇报 → 判 failed 并重试（验收 6.3-3）', async () => {
+    const { monitor, manager, db } = await setup({ startingTimeoutMs: 1_000 });
+    const taskId = runningTask(manager, futureIso());
+    db.prepare('UPDATE task_runs SET started_at = ? WHERE task_id = ?').run(pastIso(), taskId);
+    const scan = await monitor.scanOnce();
+    expect(scan.startupExpired).toEqual([taskId]);
+    expect(scan.retried).toEqual([taskId]);
+    expect(manager.tasks.byId(taskId)?.status).toBe('queued');
+    expect(manager.audit.byTarget('task', taskId).some((a) => a.action === 'task.startup-timeout')).toBe(true);
+  });
+
+  it('need_human 超过升级窗口 → critical 通知（验收 6.3-4）', async () => {
+    const notified: Notice[] = [];
+    const { monitor, manager, db } = await setup({
+      approvalTimeoutMs: 1_000,
+      startingTimeoutMs: 60 * 60 * 1000,
+      notify: async (message, severity) => {
+        notified.push({ message, severity });
+        return true;
+      },
+    });
+    const taskId = runningTask(manager, futureIso());
+    manager.applyWorkerReport(parseWorkerReport({ workspace_id: 'ws-1', task_id: taskId, status: 'need_human', need_human: true, summary: '等确认' }), WORKER);
+    db.prepare('UPDATE tasks SET last_report_at = ? WHERE id = ?').run(pastIso(), taskId);
+    const scan = await monitor.scanOnce();
+    expect(scan.needHumanEscalated).toEqual([taskId]);
+    expect(notified).toHaveLength(1);
+    expect(notified[0]?.severity).toBe('critical');
+    expect(notified[0]?.message).toContain(taskId);
+  });
+
+  it('idle：Worker 会话空闲过久且无汇报 → 疑点升级（info，不代答）', async () => {
+    const notified: Notice[] = [];
+    const { monitor, manager, db } = await setup(
+      {
+        idleStaleMs: 1_000,
+        startingTimeoutMs: 60 * 60 * 1000,
+        notify: async (message, severity) => {
+          notified.push({ message, severity });
+          return true;
+        },
+      },
+      true,
+    );
+    const taskId = runningTask(manager, futureIso());
+    manager.applyWorkerReport(parseWorkerReport({ workspace_id: 'ws-1', task_id: taskId, status: 'running', progress: 50 }), WORKER);
+    db.prepare('UPDATE tasks SET last_report_at = ? WHERE id = ?').run(pastIso(), taskId);
+    const scan = await monitor.scanOnce();
+    expect(scan.idleSuspects).toEqual([taskId]);
+    expect(scan.lost).toEqual([]);
+    expect(notified).toHaveLength(1);
+    expect(notified[0]?.severity).toBe('info');
+    expect(manager.tasks.byId(taskId)?.status).toBe('running');
+  });
+
+  it('lost：Agent 连续两轮扫描不存在才判定（双探），critical 通知', async () => {
+    const notified: Notice[] = [];
+    const { monitor, manager, db } = await setup({
+      idleStaleMs: 1_000,
+      startingTimeoutMs: 60 * 60 * 1000,
+      notify: async (message, severity) => {
+        notified.push({ message, severity });
+        return true;
+      },
+    });
+    const taskId = runningTask(manager, futureIso());
+    manager.applyWorkerReport(parseWorkerReport({ workspace_id: 'ws-1', task_id: taskId, status: 'running', progress: 50 }), WORKER);
+    db.prepare('UPDATE tasks SET last_report_at = ? WHERE id = ?').run(pastIso(), taskId);
+    const first = await monitor.scanOnce();
+    expect(first.lost).toEqual([]);
+    expect(notified).toHaveLength(0);
+    const second = await monitor.scanOnce();
+    expect(second.lost).toEqual([taskId]);
+    expect(notified).toHaveLength(1);
+    expect(notified[0]?.severity).toBe('critical');
   });
 });
