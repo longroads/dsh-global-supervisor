@@ -4,6 +4,7 @@
  * 业务归属校验由 TaskManager（assigned_session）承担第三防线。
  */
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools';
+import type { EventRoutingAction } from '../database/repository/event-routing-rule-repository.js';
 import type { SupervisorStack } from '../runtime.js';
 import { asRecord, intArg, makeTool, optionalStringArg, stringArg } from './toolkit.js';
 
@@ -368,6 +369,71 @@ export function buildSupervisorTools(stack: SupervisorStack): ToolDefinition[] {
     handler: (args) => {
       const rules = stack.routingRules.lookupAndRecord(stringArg(asRecord(args), 'text'));
       return { ok: true, matched: rules.length, rules };
+    },
+  }));
+
+  tools.push(makeTool({
+    name: 'supervisor_event_list',
+    description: '查看事件流水与路由状态（pending/observed/routed/ignored），附当前路由模式与全部路由规则。Router 用它了解系统看到了什么，并决定是否创建任务或调整过滤规则',
+    parameters: OBJ({
+      source: { type: 'string', description: '按来源过滤（schedule/im/agent/system/internal/webhook）' },
+      status: { type: 'string', description: '按处理状态过滤（pending/observed/routed/ignored）' },
+      limit: { type: 'integer', description: '返回条数（默认 20，上限 100）' },
+    }),
+    resultSchema: RESULT,
+    guard, guardDeniedMessage: DENIED,
+    handler: (args) => {
+      const record = asRecord(args);
+      const limit = intArg(record, 'limit', 20, 1, 100);
+      const events = stack.eventRouter.listEventsWithStatus(
+        optionalStringArg(record, 'source'),
+        limit,
+        optionalStringArg(record, 'status'),
+      );
+      return { ok: true, mode: stack.eventRouter.mode(), count: events.length, events, rules: stack.eventRouter.rules.list() };
+    },
+  }));
+
+  tools.push(makeTool({
+    name: 'supervisor_event_rule_save',
+    description: '保存事件路由规则（同 source_pattern 覆盖）。匹配键为 "source.type"（如 webhook.issue.opened、agent.user.message），模式支持尾缀 .* 前缀通配与裸 * 全量。action：route_to_router=转述给 Router（auto 模式生效）、route_to_worker=发给指定会话、ignore=静默丢弃、observe=只记录不派发',
+    parameters: OBJ({
+      source_pattern: { type: 'string', description: '匹配模式（如 webhook.*、agent.user.message、*）' },
+      action: { type: 'string', description: 'route_to_router / route_to_worker / ignore / observe' },
+      target_session_id: { type: 'string', description: '目标会话 ID（action=route_to_worker 时必填）' },
+      description: { type: 'string', description: '规则说明（审计用）' },
+      enabled: { type: 'boolean', description: '默认 true；false 停用但保留规则' },
+    }, ['source_pattern', 'action']),
+    resultSchema: RESULT,
+    guard, guardDeniedMessage: DENIED,
+    handler: async (args, ctx) => {
+      const record = asRecord(args);
+      const pattern = stringArg(record, 'source_pattern').trim();
+      const action = stringArg(record, 'action');
+      const actions: EventRoutingAction[] = ['route_to_router', 'route_to_worker', 'ignore', 'observe'];
+      if (pattern === '') return { ok: false, error: 'source_pattern 不能为空' };
+      if (!actions.includes(action as EventRoutingAction)) return { ok: false, error: 'action 必须是 route_to_router / route_to_worker / ignore / observe' };
+      const target = optionalStringArg(record, 'target_session_id');
+      if (action === 'route_to_worker' && target === undefined) return { ok: false, error: 'action=route_to_worker 必须提供 target_session_id' };
+      const rule = await stack.eventRouter.saveRule(
+        { sourcePattern: pattern, action: action as EventRoutingAction, targetSessionId: target, description: optionalStringArg(record, 'description'), enabled: record['enabled'] !== false },
+        ctx.callerSessionId,
+      );
+      return { ok: true, rule };
+    },
+  }));
+
+  tools.push(makeTool({
+    name: 'supervisor_event_mode_set',
+    description: '切换事件路由模式：observe（默认，规则只评估留痕不派发）/ auto（按规则真实派发到 Router 或指定会话）。建议先 observe 观察确认规则无误后切 auto',
+    parameters: OBJ({ mode: { type: 'string', description: 'observe / auto' } }, ['mode']),
+    resultSchema: RESULT,
+    guard, guardDeniedMessage: DENIED,
+    handler: (args, ctx) => {
+      const mode = stringArg(asRecord(args), 'mode');
+      if (mode !== 'observe' && mode !== 'auto') return { ok: false, error: 'mode 必须是 observe / auto' };
+      stack.eventRouter.setMode(mode, ctx.callerSessionId);
+      return { ok: true, mode: stack.eventRouter.mode() };
     },
   }));
 

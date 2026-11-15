@@ -14,6 +14,7 @@ import { SchedulerService } from '../../src/services/scheduler.js';
 import { SessionDirectNotifier } from '../../src/services/notifier.js';
 import { TaskManager } from '../../src/services/task-manager.js';
 import { WorkspaceManager } from '../../src/services/workspace-manager.js';
+import { EventRouter } from '../../src/services/event-router.js';
 import { RoutingRuleRepository } from '../../src/database/repository/routing-rule-repository.js';
 import type { SupervisorStack } from '../../src/runtime.js';
 import { isGuardDenied, makeTool } from '../../src/tools/toolkit.js';
@@ -58,6 +59,7 @@ async function buildStack(): Promise<SupervisorStack> {
     notifier: new SessionDirectNotifier(agentAdapter, () => ROUTER_SESSION),
     routerIdentity: new RouterIdentity(db, ROUTER_SESSION),
     routingRules: new RoutingRuleRepository(db),
+    eventRouter: new EventRouter(db, agentAdapter, () => ROUTER_SESSION),
   };
 }
 
@@ -195,6 +197,44 @@ describe('supervisor 工具权限与任务流', () => {
     const result = await save.execute({ keyword: 'misc', workspace_id: 'ws-999' }, execOf(ROUTER_SESSION));
     expect((result as { ok: boolean }).ok).toBe(false);
     expect((result as { error: string }).error).toContain('未纳管');
+  });
+
+  it('event_rule_save 保存后 event_list 可见规则与事件流水（observe 默认、状态 pending）', async () => {
+    const stack = await buildStack();
+    const tools = buildSupervisorTools(stack);
+    const save = tools.find((t) => t.name === 'supervisor_event_rule_save') as ToolDefinition;
+    const saved = await save.execute({ source_pattern: 'webhook.*', action: 'route_to_router', description: 'webhook 转述' }, execOf(ROUTER_SESSION));
+    expect((saved as { ok: boolean }).ok).toBe(true);
+    await stack.eventManager.ingest({ eventId: 'wh-t1', source: 'webhook', type: 'issue.opened' });
+    const list = tools.find((t) => t.name === 'supervisor_event_list') as ToolDefinition;
+    const result = await list.execute({}, execOf(ROUTER_SESSION));
+    expect((result as { mode: string }).mode).toBe('observe');
+    const events = (result as { events: Array<{ event_id: string; status: string }> }).events;
+    expect(events.some((e) => e.event_id === 'wh-t1' && e.status === 'pending')).toBe(true);
+    const rules = (result as { rules: Array<{ source_pattern: string; action: string }> }).rules;
+    expect(rules.some((r) => r.source_pattern === 'webhook.*' && r.action === 'route_to_router')).toBe(true);
+  });
+
+  it('event_rule_save：非法 action 与 route_to_worker 缺 target 拒绝', async () => {
+    const stack = await buildStack();
+    const tools = buildSupervisorTools(stack);
+    const save = tools.find((t) => t.name === 'supervisor_event_rule_save') as ToolDefinition;
+    const badAction = await save.execute({ source_pattern: 'webhook.*', action: 'explode' }, execOf(ROUTER_SESSION));
+    expect((badAction as { ok: boolean }).ok).toBe(false);
+    const noTarget = await save.execute({ source_pattern: 'webhook.*', action: 'route_to_worker' }, execOf(ROUTER_SESSION));
+    expect((noTarget as { ok: boolean }).ok).toBe(false);
+    expect((noTarget as { error: string }).error).toContain('target_session_id');
+  });
+
+  it('event_mode_set：observe/auto 持久化切换，非法值拒绝', async () => {
+    const stack = await buildStack();
+    const tools = buildSupervisorTools(stack);
+    const set = tools.find((t) => t.name === 'supervisor_event_mode_set') as ToolDefinition;
+    const switched = await set.execute({ mode: 'auto' }, execOf(ROUTER_SESSION));
+    expect((switched as { mode: string }).mode).toBe('auto');
+    expect(stack.eventRouter.mode()).toBe('auto');
+    const invalid = await set.execute({ mode: 'fast' }, execOf(ROUTER_SESSION));
+    expect((invalid as { ok: boolean }).ok).toBe(false);
   });
 });
 
