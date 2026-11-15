@@ -162,11 +162,12 @@ export function buildSupervisorTools(stack: SupervisorStack): ToolDefinition[] {
 
   tools.push(makeTool({
     name: 'supervisor_task_create',
-    description: '创建任务（pending 起步，需 supervisor_task_assign 派发；depends_on 为前置任务 ID 数组）。project_id 与 workspace_id 二选一——传 workspace_id 时自动解析对应受管项目',
+    description: '创建任务（pending 起步，需 supervisor_task_assign 派发；depends_on 为前置任务 ID 数组）。project_id 与 workspace_id 二选一——传 workspace_id 时自动解析对应受管项目。带 source_event_id 时自动订阅该事件所属 Thread（同 Thread 后续事件直通本任务 Worker）',
     parameters: OBJ({
       project_id: { type: 'string' }, workspace_id: { type: 'string', description: 'DSH workspace ID（与 project_id 二选一）' }, title: { type: 'string' }, description: { type: 'string' },
       priority: { type: 'integer' }, due_at: { type: 'string', description: 'RFC3339 截止时间' },
       depends_on: { type: 'array', items: { type: 'string' } },
+      source_event_id: { type: 'string', description: '来源事件 ID（supervisor_event_list 可查）；该事件带 thread_id 时本任务自动订阅其 Thread' },
     }, ['title']),
     resultSchema: RESULT,
     guard, guardDeniedMessage: DENIED,
@@ -183,6 +184,7 @@ export function buildSupervisorTools(stack: SupervisorStack): ToolDefinition[] {
             priority: intArg(record, 'priority', 3, 0, 9),
             dueAt: optionalStringArg(record, 'due_at'),
             dependsOn: deps,
+            sourceEventId: optionalStringArg(record, 'source_event_id'),
           },
           { sessionId: ctx.callerSessionId, role: 'router' },
         );
@@ -374,10 +376,10 @@ export function buildSupervisorTools(stack: SupervisorStack): ToolDefinition[] {
 
   tools.push(makeTool({
     name: 'supervisor_event_list',
-    description: '查看事件流水与路由状态（pending/observed/routed/ignored），附当前路由模式与全部路由规则。Router 用它了解系统看到了什么，并决定是否创建任务或调整过滤规则',
+    description: '查看事件流水与路由状态（pending/observed/routed/ignored/passed_through），附当前路由模式与全部路由规则。Router 用它了解系统看到了什么，并决定是否创建任务或调整过滤规则',
     parameters: OBJ({
       source: { type: 'string', description: '按来源过滤（schedule/im/agent/system/internal/webhook）' },
-      status: { type: 'string', description: '按处理状态过滤（pending/observed/routed/ignored）' },
+      status: { type: 'string', description: '按处理状态过滤（pending/observed/routed/ignored/passed_through）' },
       limit: { type: 'integer', description: '返回条数（默认 20，上限 100）' },
     }),
     resultSchema: RESULT,

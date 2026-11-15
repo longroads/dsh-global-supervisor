@@ -16,6 +16,7 @@ import { TaskManager } from '../../src/services/task-manager.js';
 import { WorkspaceManager } from '../../src/services/workspace-manager.js';
 import { EventRouter } from '../../src/services/event-router.js';
 import { RoutingRuleRepository } from '../../src/database/repository/routing-rule-repository.js';
+import { ThreadSubscriptionRepository } from '../../src/database/repository/thread-subscription-repository.js';
 import type { SupervisorStack } from '../../src/runtime.js';
 import { isGuardDenied, makeTool } from '../../src/tools/toolkit.js';
 import { buildSupervisorTools } from '../../src/tools/supervisor-tools.js';
@@ -59,7 +60,8 @@ async function buildStack(): Promise<SupervisorStack> {
     notifier: new SessionDirectNotifier(agentAdapter, () => ROUTER_SESSION),
     routerIdentity: new RouterIdentity(db, ROUTER_SESSION),
     routingRules: new RoutingRuleRepository(db),
-    eventRouter: new EventRouter(db, agentAdapter, () => ROUTER_SESSION),
+    // 派发目标用空实现替身：工具层测试不依赖真实 Agent 服务（派发失败会降级 pending，掩盖路由结果）
+    eventRouter: new EventRouter(db, { dispatch: async () => undefined }, () => ROUTER_SESSION),
   };
 }
 
@@ -235,6 +237,37 @@ describe('supervisor 工具权限与任务流', () => {
     expect(stack.eventRouter.mode()).toBe('auto');
     const invalid = await set.execute({ mode: 'fast' }, execOf(ROUTER_SESSION));
     expect((invalid as { ok: boolean }).ok).toBe(false);
+  });
+
+  it('task_create 带 source_event_id：任务落库来源事件并自动订阅其 Thread', async () => {
+    const stack = await buildStack();
+    const tools = buildSupervisorTools(stack);
+    await stack.eventManager.ingest({ eventId: 'wh-1', source: 'webhook', type: 'issue.opened', threadId: 'th-1' });
+    const create = tools.find((t) => t.name === 'supervisor_task_create') as ToolDefinition;
+    const result = await create.execute({ project_id: 'proj-1', title: '来自事件的任务', source_event_id: 'wh-1' }, execOf(ROUTER_SESSION));
+    expect((result as { ok: boolean }).ok).toBe(true);
+    const task = (result as { task: { id: string; source_event_id: string | null } }).task;
+    expect(task.source_event_id).toBe('wh-1');
+    expect(new ThreadSubscriptionRepository(stack.db).threadsOfTask(task.id)).toEqual(['th-1']);
+  });
+
+  it('event_list 呈现 passed_through：Thread 直通事件不进 Router', async () => {
+    const stack = await buildStack();
+    const tools = buildSupervisorTools(stack);
+    const subscriber = stack.taskManager.createTask({ projectId: 'proj-1', title: '订阅者任务' }, { sessionId: ROUTER_SESSION, role: 'router' });
+    stack.taskManager.enqueue(subscriber.id, { sessionId: ROUTER_SESSION, role: 'router' });
+    stack.taskManager.markDispatched(subscriber.id, WORKER_SESSION, null);
+    new ThreadSubscriptionRepository(stack.db).subscribe(subscriber.id, 'th-1');
+    await stack.eventManager.ingest({ eventId: 'wh-2', source: 'webhook', type: 'issue.opened', threadId: 'th-1' });
+    const set = tools.find((t) => t.name === 'supervisor_event_mode_set') as ToolDefinition;
+    await set.execute({ mode: 'auto' }, execOf(ROUTER_SESSION));
+    const row = stack.eventManager.repository.byEventId('wh-2');
+    if (!row) throw new Error('事件未落库');
+    await stack.eventRouter.route(row);
+    const list = tools.find((t) => t.name === 'supervisor_event_list') as ToolDefinition;
+    const result = await list.execute({ status: 'passed_through' }, execOf(ROUTER_SESSION));
+    const events = (result as { events: Array<{ event_id: string; status: string }> }).events;
+    expect(events.some((e) => e.event_id === 'wh-2' && e.status === 'passed_through')).toBe(true);
   });
 });
 
