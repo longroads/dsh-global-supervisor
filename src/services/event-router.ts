@@ -9,6 +9,8 @@ import { EventRepository } from '../database/repository/event-repository.js';
 import { EventRoutingRuleRepository } from '../database/repository/event-routing-rule-repository.js';
 import type { EventRoutingAction, EventRoutingRuleRow } from '../database/repository/event-routing-rule-repository.js';
 import { PluginSettingRepository } from '../database/repository/plugin-setting-repository.js';
+import { ThreadSubscriptionRepository } from '../database/repository/thread-subscription-repository.js';
+import type { ThreadSubscriber } from '../database/repository/thread-subscription-repository.js';
 import type { EventRow } from '../types/index.js';
 
 /** 事件派发目标（DshAgentAdapter 的 dispatch 最小面，便于测试替身）。 */
@@ -17,7 +19,7 @@ export interface EventDispatchTarget {
 }
 
 /** 路由结果（与 audit_logs.action 一致的机器可判别值）。 */
-export type RouteOutcome = 'event.pending' | 'event.observed' | 'event.routed' | 'event.ignored';
+export type RouteOutcome = 'event.pending' | 'event.observed' | 'event.routed' | 'event.ignored' | 'event.passed_through';
 
 /** supervisor_event_list 的单行视图（状态由该事件最新一条审计派生）。 */
 export interface EventWithStatus {
@@ -26,7 +28,7 @@ export interface EventWithStatus {
   type: string;
   created_at: string;
   payload_excerpt: string;
-  status: 'pending' | 'observed' | 'routed' | 'ignored';
+  status: 'pending' | 'observed' | 'routed' | 'ignored' | 'passed_through';
 }
 
 const MODE_KEY = 'eventRoutingMode';
@@ -36,6 +38,7 @@ export class EventRouter {
   private readonly settings: PluginSettingRepository;
   private readonly audit: AuditRepository;
   private readonly events: EventRepository;
+  private readonly threadSubs: ThreadSubscriptionRepository;
 
   constructor(
     db: DatabaseSync,
@@ -46,6 +49,7 @@ export class EventRouter {
     this.settings = new PluginSettingRepository(db);
     this.audit = new AuditRepository(db);
     this.events = new EventRepository(db);
+    this.threadSubs = new ThreadSubscriptionRepository(db);
   }
 
   /** 当前路由模式（默认 observe——安全机制）。 */
@@ -75,6 +79,8 @@ export class EventRouter {
 
   /** 事件到达后的路由决策（永不抛错——派发失败降级 pending 并记入审计）。 */
   async route(event: EventRow): Promise<RouteOutcome> {
+    const passThrough = await this.routeThreadPassThrough(event);
+    if (passThrough !== undefined) return passThrough;
     const rule = this.rules.match(event.source, event.type);
     if (!rule) {
       this.audit.log({ actorRole: 'system', action: 'event.pending', targetType: 'event', targetId: event.event_id });
@@ -116,6 +122,56 @@ export class EventRouter {
     return routed ? 'event.routed' : 'event.pending';
   }
 
+  /**
+   * Thread 直通（最高优先级）：事件所属 Thread 有 running 且已派发会话的订阅者时，
+   * 事件直投其 Worker 会话且不经 Router。无无可投订阅者时返回 undefined——事件继续走规则路由（不丢事件）。
+   */
+  private async routeThreadPassThrough(event: EventRow): Promise<RouteOutcome | undefined> {
+    if (event.thread_id === null) return undefined;
+    const dispatchable = this.threadSubs
+      .runningSubscribers(event.thread_id)
+      .filter((s): s is ThreadSubscriber & { assigned_session_id: string } => s.assigned_session_id !== null);
+    if (dispatchable.length === 0) return undefined;
+    if (this.mode() === 'observe') {
+      this.audit.log({
+        actorRole: 'system',
+        action: 'event.observed',
+        targetType: 'event',
+        targetId: event.event_id,
+        detailJson: JSON.stringify({ passedThrough: true, would: 'thread_pass_through', targets: dispatchable.map((s) => s.assigned_session_id) }),
+      });
+      return 'event.observed';
+    }
+    const targets: Array<{ taskId: string; sessionId: string; failure?: string }> = [];
+    for (const subscriber of dispatchable) {
+      try {
+        await this.agents.dispatch(subscriber.assigned_session_id, buildThreadPassNotice(event));
+        targets.push({ taskId: subscriber.task_id, sessionId: subscriber.assigned_session_id });
+      } catch (error) {
+        targets.push({ taskId: subscriber.task_id, sessionId: subscriber.assigned_session_id, failure: error instanceof Error ? error.message : String(error) });
+      }
+    }
+    const succeeded = targets.filter((t) => t.failure === undefined);
+    if (succeeded.length === 0) {
+      this.audit.log({
+        actorRole: 'system',
+        action: 'event.pending',
+        targetType: 'event',
+        targetId: event.event_id,
+        detailJson: JSON.stringify({ threadId: event.thread_id, passedThrough: true, failure: targets.map((t) => t.failure).join('; ') }),
+      });
+      return 'event.pending';
+    }
+    this.audit.log({
+      actorRole: 'system',
+      action: 'event.passed_through',
+      targetType: 'event',
+      targetId: event.event_id,
+      detailJson: JSON.stringify({ threadId: event.thread_id, targets }),
+    });
+    return 'event.passed_through';
+  }
+
   /** 事件流水 + 每条的路由状态（可选按来源/状态过滤）。 */
   listEventsWithStatus(source: string | undefined, limit: number, statusFilter: string | undefined): EventWithStatus[] {
     const rows = this.events.listFiltered(source, limit);
@@ -140,6 +196,7 @@ export class EventRouter {
 /** 由该事件的审计 action 序列派生最终状态（'event.*' 前缀之外的动作如 mode.set 不参与——按 targetType 隔离已保证）。 */
 function deriveStatusFromAuditActions(actions: string[]): EventWithStatus['status'] {
   const latest = actions[actions.length - 1];
+  if (latest === 'event.passed_through') return 'passed_through';
   if (latest === 'event.observed') return 'observed';
   if (latest === 'event.routed') return 'routed';
   if (latest === 'event.ignored') return 'ignored';
@@ -149,4 +206,9 @@ function deriveStatusFromAuditActions(actions: string[]): EventWithStatus['statu
 /** followup 通知正文（来源/类型/ID + 负载摘要截断）。 */
 function buildEventNotice(event: EventRow): string {
   return `【supervisor 事件】${event.source}.${event.type}（${event.event_id}）\n${event.payload_json.slice(0, 300)}\n处理可用 supervisor_task_create / supervisor_event_list；噪音可用 supervisor_event_rule_save 建 ignore 规则。`;
+}
+
+/** Thread 直通通知正文（投给 Worker 会话；负载摘要截断更长）。 */
+function buildThreadPassNotice(event: EventRow): string {
+  return `【Thread 直通】${event.source}.${event.type}（${event.event_id}）\n${event.payload_json.slice(0, 2000)}`;
 }
