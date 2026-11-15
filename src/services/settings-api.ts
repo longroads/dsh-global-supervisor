@@ -42,8 +42,31 @@ function jsonResponse(data: unknown, status = 200): Response {
   });
 }
 
-/** 注册设置 API 路由（幂等调用方保证一次性）。 */
-export async function registerSettingsApi(ctx: Context, stack: SupervisorStack): Promise<void> {
+/** Webhook 事件路由选项（ITERATION_PLAN 1-D；来自插件 config.events）。 */
+export interface WebhookEventOptions {
+  webhookSources: string[];
+  maxEventTextChars: number;
+  redactPatterns: boolean;
+}
+
+// 凭证脱敏正则（借鉴 MYCF711 redact() 单出口模式）：GitHub PAT / PEM 私钥 / Bearer / api key
+const REDACT_PATTERNS: RegExp[] = [
+  /ghp_[A-Za-z0-9]{20,}/g,
+  /github_pat_[A-Za-z0-9_]{20,}/g,
+  /-----BEGIN [A-Z ]+-----[\s\S]*?-----END [A-Z ]+-----/g,
+  /Bearer\s+[A-Za-z0-9\-._~+/]+=*/g,
+  /\b(?:api[-_]?key|apikey|access[-_]?token|secret)\b["'\s:=]+[A-Za-z0-9\-._]{16,}/gi,
+];
+
+/** 凭证脱敏：Webhook 事件正文进入 EventManager 前的单出口过滤。 */
+export function redact(text: string): string {
+  let out = text;
+  for (const pattern of REDACT_PATTERNS) out = out.replace(pattern, '[REDACTED]');
+  return out;
+}
+
+/** 注册设置 API 路由（幂等调用方保证一次性；webhookOptions 为 Webhook 事件路由配置）。 */
+export async function registerSettingsApi(ctx: Context, stack: SupervisorStack, webhookOptions?: WebhookEventOptions): Promise<void> {
   const webServer = await awaitService<WebServerLike>(ctx, 'webServer');
 
   webServer.register({
@@ -136,17 +159,76 @@ export async function registerSettingsApi(ctx: Context, stack: SupervisorStack):
       res.end(JSON.stringify({ ok: true, router: record }));
     },
   });
+
+  // Webhook 事件路由（ITERATION_PLAN 1-D）：外部系统 POST → redact/截断 → EventManager 统一入口
+  webServer.register({
+    kind: 'prefix',
+    path: '/global-supervisor/events',
+    handler: async (req: IncomingMessage, res: ServerResponse) => {
+      res.setHeader('content-type', 'application/json; charset=utf-8');
+      const origin = req.headers.origin ?? '';
+      const host = req.headers.host ?? '';
+      if (origin !== '' && origin !== `http://${host}`) {
+        res.statusCode = 403;
+        res.end(JSON.stringify({ ok: false, error: 'origin' }));
+        return;
+      }
+      if (req.method !== 'POST') {
+        res.statusCode = 405;
+        res.end(JSON.stringify({ ok: false, error: 'method-not-allowed' }));
+        return;
+      }
+      const body = await readJsonBody(req, 65_536);
+      if (body === undefined) {
+        res.statusCode = 400;
+        res.end(JSON.stringify({ ok: false, error: 'invalid-body' }));
+        return;
+      }
+      const source = typeof body['source'] === 'string' ? body['source'] : '';
+      const allowed = webhookOptions?.webhookSources ?? [];
+      if (allowed.length > 0 && !allowed.includes(source)) {
+        res.statusCode = 403;
+        res.end(JSON.stringify({ ok: false, error: 'source-not-allowed' }));
+        return;
+      }
+      const type = typeof body['type'] === 'string' ? body['type'] : '';
+      if (type === '') {
+        res.statusCode = 400;
+        res.end(JSON.stringify({ ok: false, error: 'missing-type' }));
+        return;
+      }
+      let payloadJson = '{}';
+      if (body['payload'] !== undefined) payloadJson = JSON.stringify(body['payload']);
+      if (webhookOptions?.redactPatterns !== false) payloadJson = redact(payloadJson);
+      const maxChars = webhookOptions?.maxEventTextChars ?? 4000;
+      if (payloadJson.length > maxChars) {
+        payloadJson = JSON.stringify({ truncated: true, text: payloadJson.slice(0, maxChars) });
+      }
+      const explicitId = typeof body['event_id'] === 'string' ? (body['event_id'] as string).trim() : '';
+      const eventId = explicitId !== '' ? `webhook:${source}:${explicitId}` : `webhook:${source}:${type}:${Date.now()}`;
+      const result = await stack.eventManager.ingest({
+        eventId,
+        source: 'webhook',
+        type,
+        payloadJson,
+        threadId: typeof body['thread_id'] === 'string' ? (body['thread_id'] as string) : undefined,
+        channelRef: source !== '' ? `webhook:${source}` : undefined,
+      });
+      res.statusCode = 202;
+      res.end(JSON.stringify({ ok: true, inserted: result.inserted, duplicate: !result.inserted }));
+    },
+  });
 }
 
-/** 读取并解析 JSON 请求体（上限 4KB，畸形返回 undefined）。 */
-function readJsonBody(req: { on: (event: string, cb: (chunk?: Buffer) => void) => void }): Promise<Record<string, unknown> | undefined> {
+/** 读取并解析 JSON 请求体（超限或畸形返回 undefined；claim 默认 4KB，webhook 可放宽至 64KB）。 */
+function readJsonBody(req: { on: (event: string, cb: (chunk?: Buffer) => void) => void }, limit = 4096): Promise<Record<string, unknown> | undefined> {
   return new Promise((resolve) => {
     const chunks: Buffer[] = [];
     let size = 0;
     req.on('data', (chunk?: Buffer) => {
       if (chunk) {
         size += chunk.length;
-        if (size > 4096) {
+        if (size > limit) {
           resolve(undefined);
           return;
         }

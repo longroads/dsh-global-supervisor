@@ -6,7 +6,8 @@ import { DshWorkspaceAdapter } from '../../src/adapters/dsh-workspace.js';
 import { WorkspaceManager } from '../../src/services/workspace-manager.js';
 import { RouterIdentity } from '../../src/services/router-identity.js';
 import { TaskManager } from '../../src/services/task-manager.js';
-import { registerSettingsApi } from '../../src/services/settings-api.js';
+import { EventManager } from '../../src/services/event-manager.js';
+import { redact, registerSettingsApi } from '../../src/services/settings-api.js';
 import type { SupervisorStack } from '../../src/runtime.js';
 
 interface CapturedRoute {
@@ -41,6 +42,7 @@ async function buildStack(ctx: Context): Promise<SupervisorStack> {
     routerIdentity: new RouterIdentity(db, ''),
     workspaceManager: new WorkspaceManager(new DshWorkspaceAdapter(ctx), db),
     sessionAdapter: new DshSessionAdapter(ctx),
+    eventManager: new EventManager(db),
   } as unknown as SupervisorStack;
 }
 
@@ -56,13 +58,15 @@ function fakeRes() {
 }
 
 describe('设置面板 HTTP API', () => {
-  it('注册三条路由：settings（resource）、client-ping 与 claim（handler）', async () => {
+  it('注册四条路由：settings（resource）、client-ping、claim 与 events（handler）', async () => {
     const { ctx, routes } = fakeCtxWithWebServer();
     const stack = await buildStack(ctx);
     await registerSettingsApi(ctx, stack);
-    expect(routes.map((r) => r.path)).toEqual(['/global-supervisor/settings', '/global-supervisor/client-ping', '/global-supervisor/claim']);
+    expect(routes.map((r) => r.path)).toEqual(['/global-supervisor/settings', '/global-supervisor/client-ping', '/global-supervisor/claim', '/global-supervisor/events']);
     expect(typeof routes[0]?.resource).toBe('function');
     expect(typeof routes[2]?.handler).toBe('function');
+    expect(routes[3]?.kind).toBe('prefix');
+    expect(typeof routes[3]?.handler).toBe('function');
   });
 
   it('GET settings 返回 workspace 清单与当前 Router（null 表示未设置）', async () => {
@@ -110,5 +114,90 @@ describe('设置面板 HTTP API', () => {
     const res2 = fakeRes();
     await routes[2]?.handler?.(badBody, res2);
     expect(res2.statusCode).toBe(400);
+  });
+
+  it('POST webhook：合法事件 202 入库携带 thread/channel 元数据；同 event_id 重复投递返回 duplicate', async () => {
+    const { ctx, routes } = fakeCtxWithWebServer();
+    const stack = await buildStack(ctx);
+    await registerSettingsApi(ctx, stack, { webhookSources: [], maxEventTextChars: 4000, redactPatterns: true });
+    const post = (body: unknown) => {
+      const chunks: Buffer[] = [Buffer.from(JSON.stringify(body))];
+      return {
+        method: 'POST',
+        headers: {},
+        on: (event: string, cb: (chunk?: Buffer) => void) => {
+          if (event === 'data') chunks.forEach((c) => cb(c));
+          if (event === 'end') cb();
+        },
+      };
+    };
+    const res1 = fakeRes();
+    await routes[3]?.handler?.(post({ source: 'github', type: 'issue.opened', event_id: 'gh-1', thread_id: '42', payload: { body: 'hello' } }), res1);
+    expect(res1.statusCode).toBe(202);
+    expect(JSON.parse(res1.body).inserted).toBe(true);
+    const row = stack.eventManager.repository.byEventId('webhook:github:gh-1');
+    expect(row?.thread_id).toBe('42');
+    expect(row?.channel_ref).toBe('webhook:github');
+    const res2 = fakeRes();
+    await routes[3]?.handler?.(post({ source: 'github', type: 'issue.opened', event_id: 'gh-1' }), res2);
+    expect(JSON.parse(res2.body).duplicate).toBe(true);
+  });
+
+  it('POST webhook：凭证脱敏——ghp_ token 在入库负载中被替换', async () => {
+    const { ctx, routes } = fakeCtxWithWebServer();
+    const stack = await buildStack(ctx);
+    await registerSettingsApi(ctx, stack, { webhookSources: [], maxEventTextChars: 4000, redactPatterns: true });
+    const res = fakeRes();
+    const chunks: Buffer[] = [Buffer.from(JSON.stringify({ source: 'ci', type: 'log.pushed', event_id: 'ci-9', payload: { body: 'token ghp_abcdefghijklmnopqrst012345 end' } }))];
+    await routes[3]?.handler?.({
+      method: 'POST',
+      headers: {},
+      on: (event: string, cb: (chunk?: Buffer) => void) => {
+        if (event === 'data') chunks.forEach((c) => cb(c));
+        if (event === 'end') cb();
+      },
+    }, res);
+    expect(res.statusCode).toBe(202);
+    const row = stack.eventManager.repository.byEventId('webhook:ci:ci-9');
+    expect(row?.payload_json).toContain('[REDACTED]');
+    expect(row?.payload_json).not.toContain('ghp_abcdef');
+  });
+
+  it('POST webhook：GET 405；跨源 403；缺 type 400；来源不在白名单 403', async () => {
+    const { ctx, routes } = fakeCtxWithWebServer();
+    const stack = await buildStack(ctx);
+    await registerSettingsApi(ctx, stack, { webhookSources: ['github'], maxEventTextChars: 4000, redactPatterns: true });
+    const emit = (method: string, headers: Record<string, string>, body: unknown) => {
+      const chunks: Buffer[] = body === undefined ? [] : [Buffer.from(JSON.stringify(body))];
+      return {
+        method,
+        headers,
+        on: (event: string, cb: (chunk?: Buffer) => void) => {
+          if (event === 'data') chunks.forEach((c) => cb(c));
+          if (event === 'end') cb();
+        },
+      };
+    };
+    const res1 = fakeRes();
+    await routes[3]?.handler?.(emit('GET', {}, undefined), res1);
+    expect(res1.statusCode).toBe(405);
+    const res2 = fakeRes();
+    await routes[3]?.handler?.(emit('POST', { origin: 'http://evil', host: 'h:1' }, {}), res2);
+    expect(res2.statusCode).toBe(403);
+    const res3 = fakeRes();
+    await routes[3]?.handler?.(emit('POST', {}, { source: 'gitlab', type: 'x' }), res3);
+    expect(res3.statusCode).toBe(403);
+    const res4 = fakeRes();
+    await routes[3]?.handler?.(emit('POST', {}, { source: 'github' }), res4);
+    expect(res4.statusCode).toBe(400);
+  });
+
+  it('redact()：五类凭证模式均被替换，普通文本不受影响', () => {
+    expect(redact(`ghp_${'a'.repeat(30)}`)).toBe('[REDACTED]');
+    expect(redact(`github_pat_${'b'.repeat(30)}`)).toBe('[REDACTED]');
+    expect(redact('Bearer abcdef1234567890')).toBe('[REDACTED]');
+    expect(redact('-----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----')).toBe('[REDACTED]');
+    expect(redact('api_key=Abcdef1234567890xyz')).toBe('[REDACTED]');
+    expect(redact('普通文本 token_id 不受影响')).toBe('普通文本 token_id 不受影响');
   });
 });

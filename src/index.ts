@@ -12,6 +12,7 @@ import type { ToolDefinition } from '@deepseek-ai/dsh-tools';
 import type {} from '@deepseek-ai/dsh-workspace';
 import type {} from '@deepseek-ai/dsh-agent';
 import type {} from '@deepseek-ai/dsh-schedule';
+import type {} from '@deepseek-ai/dsh-session';
 import type {} from '@deepseek-ai/dsh-session-persistence';
 import type {} from '@deepseek-ai/dsh-tools';
 
@@ -23,12 +24,20 @@ function captureToolInvocation(agentId: string | undefined, args: unknown): void
   lastToolInvocation = { agentId: agentId ?? '(exec.agent 缺失)', args, at: new Date().toISOString() };
 }
 
+/** 事件接入配置（Webhook 事件路由，ITERATION_PLAN 1-D）。 */
+interface EventsConfig {
+  webhookSources: string[];
+  maxEventTextChars: number;
+  redactPatterns: boolean;
+}
+
 /** 插件配置（结构定义；schema 声明见下方 Config，profile 的 cordis.patch.yml 可覆盖）。 */
 interface PluginConfig {
   probe: boolean;
   dataDir: string;
   routerWorkspaceId: string;
   routerSessionId: string;
+  events: EventsConfig;
 }
 
 /** 插件配置 schema（schemastery，DSH 插件惯例）。 */
@@ -37,6 +46,11 @@ export const Config = z.object({
   dataDir: z.string().default('').description('插件数据目录（默认经 dsh-home-paths 解析为 ~/.dsh/global-supervisor）'),
   routerWorkspaceId: z.string().default('').description('Router 所属 DSH workspace ID（super-space01）'),
   routerSessionId: z.string().default('').description('Router 固定会话 ID（supervisor_* 工具的唯一授权调用方；留空则不启用业务工具）'),
+  events: z.object({
+    webhookSources: z.array(z.string()).default([]).description('允许的 Webhook 事件来源标识白名单；空数组表示不限制'),
+    maxEventTextChars: z.number().default(4000).description('Webhook 事件正文截断上限（字符）'),
+    redactPatterns: z.boolean().default(true).description('是否启用事件正文凭证脱敏（ghp_/PEM/Bearer/api key）'),
+  }).default({ webhookSources: [], maxEventTextChars: 4000, redactPatterns: true }).description('事件接入配置'),
 });
 
 /** Cordis 插件名（profile bundles / patch 的定位标识）。 */
@@ -141,7 +155,9 @@ export function apply(ctx: Context, config: PluginConfig): void {
         if (scheduleReconcile.remoteMissing.length > 0) {
           void writeLoadMarker('schedule-reconcile', scheduleReconcile);
         }
-        // 事件源接入（§6.4 第一版）：Worker 汇报与 Agent 异常经统一事件入口留痕
+        // 事件源接入（§6.4 + ITERATION_PLAN 1-C；事件名经 0.2.2-rc.1 类型基线核实）：
+        // agent/error / agent/status / agent/inbox/inserted（dsh-agent）、
+        // tools/result（dsh-tools）、session/event 过滤 turn/end（dsh-session）
         ctx.on('agent/error', (payload: { agent: { id: string }; error: unknown }) => {
           void stack.eventManager.ingest({
             eventId: `agent-error:${payload.agent.id}:${Date.now()}`,
@@ -151,9 +167,56 @@ export function apply(ctx: Context, config: PluginConfig): void {
             payloadJson: JSON.stringify({ message: payload.error instanceof Error ? payload.error.message : String(payload.error) }),
           });
         });
+        ctx.on('agent/status', (payload: { agent?: { id: string }; status?: string }) => {
+          if (!payload.agent?.id || !payload.status) return;
+          void stack.eventManager.ingest({
+            eventId: `agent-status:${payload.agent.id}:${payload.status}:${Date.now()}`,
+            source: 'agent',
+            type: 'agent.status',
+            payloadJson: JSON.stringify({ agentId: payload.agent.id, status: payload.status }),
+          });
+        });
+        ctx.on('agent/inbox/inserted', (payload) => {
+          void stack.eventManager.ingest({
+            eventId: `user-msg:${payload.agent.id}:${payload.message.id}`,
+            source: 'agent',
+            type: 'user.message',
+            payloadJson: JSON.stringify({ agentId: payload.agent.id, content: payload.message.content }),
+            human: payload.message.source?.kind === 'user',
+          });
+        });
+        ctx.on('tools/result', (exec): undefined => {
+          const agentId = exec.agent?.id;
+          if (agentId) {
+            void stack.eventManager.ingest({
+              eventId: `tool-result:${agentId}:${exec.name}:${Date.now()}`,
+              source: 'agent',
+              type: 'tool.result',
+              payloadJson: JSON.stringify({ toolName: exec.name, agentId }),
+            });
+          }
+          return undefined;
+        });
+        ctx.on('session/event', (session, event) => {
+          if (event.type !== 'turn/end') return;
+          void stack.eventManager.ingest({
+            eventId: `turn-end:${session.id}:${String(event.seq)}`,
+            source: 'agent',
+            type: 'turn.end',
+            payloadJson: JSON.stringify({ sessionId: session.id, turn: event.data.turn, reason: event.data.reason }),
+          });
+        });
+        // EventManager 派发规则：Worker turn 结束 → 刷新对应 running 任务心跳（Watchdog 数据源）
+        stack.eventManager.on('turn.end', async (event) => {
+          const payload = JSON.parse(event.payload_json) as { sessionId?: string };
+          if (!payload.sessionId) return;
+          for (const task of stack.taskManager.tasks.list({ status: 'running' })) {
+            if (task.assigned_session_id === payload.sessionId) stack.taskManager.tasks.touchReport(task.id);
+          }
+        });
         // 设置面板 HTTP API（Router 身份管理入口；契约见 docs/UI_PANEL_PLAN.md）
         const { registerSettingsApi } = await import('./services/settings-api.js');
-        await registerSettingsApi(ctx, stack);
+        await registerSettingsApi(ctx, stack, config.events);
         const { buildSupervisorTools } = await import('./tools/supervisor-tools.js');
         const { buildWorkerReportTool } = await import('./tools/worker-report-tool.js');
         const all = [...buildSupervisorTools(stack), buildWorkerReportTool(stack)];
