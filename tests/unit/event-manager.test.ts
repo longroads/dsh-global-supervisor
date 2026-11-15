@@ -67,4 +67,23 @@ describe('EventManager 去重与路由', () => {
     expect(captured?.payload_json).toContain('1800000');
     db.close();
   });
+
+  it('路由元数据（thread/channel/actor/human）随事件落库', async () => {
+    const { manager, db } = await setup();
+    await manager.ingest({
+      eventId: 'wh-1',
+      source: 'webhook',
+      type: 'issue.opened',
+      threadId: 'gh-42',
+      channelRef: 'webhook:github',
+      actorJson: '{"id":"u1","name":"alice"}',
+      human: true,
+    });
+    const row = manager.repository.byEventId('wh-1');
+    expect(row?.thread_id).toBe('gh-42');
+    expect(row?.channel_ref).toBe('webhook:github');
+    expect(row?.actor_json).toBe('{"id":"u1","name":"alice"}');
+    expect(row?.human).toBe(1);
+    db.close();
+  });
 });

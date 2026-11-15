@@ -32,8 +32,8 @@ describe('数据库连接与迁移', async () => {
     db1.close();
     const db2 = await openDatabase(path);
     const row = db2.prepare('SELECT COUNT(*) AS n, MAX(version) AS v FROM schema_version').get() as { n: number; v: number };
-    expect(row.n).toBe(2);
-    expect(row.v).toBeGreaterThanOrEqual(2);
+    expect(row.n).toBe(3);
+    expect(row.v).toBeGreaterThanOrEqual(3);
     db2.close();
   });
 

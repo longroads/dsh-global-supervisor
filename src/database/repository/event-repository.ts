@@ -24,11 +24,15 @@ export class EventRepository {
     taskId?: string;
     payloadJson?: string;
     dedupHash?: string;
+    threadId?: string;
+    channelRef?: string;
+    actorJson?: string;
+    human?: boolean;
   }): boolean {
     const result = this.db
       .prepare(
-        `INSERT OR IGNORE INTO events(event_id, source, type, workspace_id, task_id, payload_json, dedup_hash, created_at)
-         VALUES(?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT OR IGNORE INTO events(event_id, source, type, workspace_id, task_id, payload_json, dedup_hash, thread_id, channel_ref, actor_json, human, created_at)
+         VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         input.eventId,
@@ -38,6 +42,10 @@ export class EventRepository {
         input.taskId ?? null,
         input.payloadJson ?? '{}',
         input.dedupHash ?? null,
+        input.threadId ?? null,
+        input.channelRef ?? null,
+        input.actorJson ?? null,
+        input.human ? 1 : 0,
         now(),
       );
     return result.changes > 0;

@@ -16,6 +16,14 @@ export interface SupervisorEventInput {
   taskId?: string;
   payloadJson?: string;
   dedupHash?: string;
+  /** 事件的 Thread 归属标识（如 GitHub Issue 编号、飞书话题 ID） */
+  threadId?: string;
+  /** 来源信道标识（如 im:feishu:group_123, webhook:github:repo_456） */
+  channelRef?: string;
+  /** 发送者身份（经 Gate 过滤后携带） */
+  actorJson?: string;
+  /** 是否为人类消息 */
+  human?: boolean;
 }
 
 /** 事件处理器。 */
@@ -59,6 +67,10 @@ export class EventManager {
       taskId: event.taskId,
       payloadJson: event.payloadJson,
       dedupHash: event.dedupHash,
+      threadId: event.threadId,
+      channelRef: event.channelRef,
+      actorJson: event.actorJson,
+      human: event.human,
     });
     if (!inserted) {
       return { inserted: false, dispatched: 0, errors: [] };

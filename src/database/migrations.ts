@@ -142,6 +142,46 @@ export const MIGRATIONS: readonly Migration[] = [
       );
     `,
   },
+  {
+    version: 3,
+    name: 'events-rebuild-webhook-source-and-routing-rules',
+    up: `
+      CREATE TABLE events_rebuilt (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        event_id TEXT NOT NULL UNIQUE,
+        source TEXT NOT NULL CHECK (source IN ('schedule','im','agent','system','internal','webhook')),
+        type TEXT NOT NULL,
+        workspace_id TEXT,
+        task_id TEXT,
+        payload_json TEXT NOT NULL DEFAULT '{}',
+        dedup_hash TEXT,
+        thread_id TEXT,
+        channel_ref TEXT,
+        actor_json TEXT,
+        human INTEGER DEFAULT 0,
+        created_at TEXT NOT NULL
+      );
+      INSERT INTO events_rebuilt (event_id, source, type, workspace_id, task_id, payload_json, dedup_hash, created_at)
+        SELECT event_id, source, type, workspace_id, task_id, payload_json, dedup_hash, created_at FROM events;
+      DROP TABLE events;
+      ALTER TABLE events_rebuilt RENAME TO events;
+      CREATE INDEX idx_events_created ON events(created_at);
+      CREATE INDEX idx_events_workspace ON events(workspace_id);
+      CREATE INDEX idx_events_thread ON events(thread_id);
+
+      CREATE TABLE routing_rules (
+        id TEXT PRIMARY KEY,
+        keyword TEXT NOT NULL,
+        workspace_id TEXT NOT NULL,
+        created_by TEXT NOT NULL DEFAULT 'user',
+        note TEXT DEFAULT '',
+        hit_count INTEGER DEFAULT 0,
+        enabled INTEGER DEFAULT 1,
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX idx_routing_keyword ON routing_rules(keyword);
+    `,
+  },
 ];
 
 /** 迁移执行器：按 version 升序应用未执行的迁移，每条独立事务。 */

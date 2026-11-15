@@ -12,6 +12,7 @@ import { EventManager } from './services/event-manager.js';
 import { AgentController } from './services/agent-controller.js';
 import { ProjectMonitor } from './services/project-monitor.js';
 import { RouterIdentity } from './services/router-identity.js';
+import { RoutingRuleRepository } from './database/repository/routing-rule-repository.js';
 import { SchedulerService } from './services/scheduler.js';
 import { SessionDirectNotifier } from './services/notifier.js';
 import { TaskManager } from './services/task-manager.js';
@@ -30,6 +31,7 @@ export interface SupervisorStack {
   monitor: ProjectMonitor;
   notifier: SessionDirectNotifier;
   routerIdentity: RouterIdentity;
+  routingRules: RoutingRuleRepository;
 }
 
 /** 数据库文件名（位于插件数据目录下）。 */
@@ -71,6 +73,7 @@ export async function createStack(ctx: Context, options: { dataDir?: string; rou
     monitor,
     notifier,
     routerIdentity,
+    routingRules: new RoutingRuleRepository(db),
   };
 }
 

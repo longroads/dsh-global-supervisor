@@ -63,7 +63,7 @@ export type ProjectHealth = 'ok' | 'warning' | 'blocked' | 'unknown';
 export type RunOutcome = 'completed' | 'failed' | 'timeout' | 'canceled';
 
 /** 事件来源。 */
-export type EventSource = 'schedule' | 'im' | 'agent' | 'system' | 'internal';
+export type EventSource = 'schedule' | 'im' | 'agent' | 'system' | 'internal' | 'webhook';
 
 /** projects 表行。 */
 export interface ProjectRow {
@@ -126,5 +126,21 @@ export interface EventRow {
   task_id: string | null;
   payload_json: string;
   dedup_hash: string | null;
+  thread_id: string | null;
+  channel_ref: string | null;
+  actor_json: string | null;
+  human: number;
+  created_at: string;
+}
+
+/** routing_rules 表行。 */
+export interface RoutingRuleRow {
+  id: string;
+  keyword: string;
+  workspace_id: string;
+  created_by: string;
+  note: string;
+  hit_count: number;
+  enabled: number;
   created_at: string;
 }
