@@ -13,6 +13,7 @@ import { NotifierService, SessionDirectNotifier } from '../../src/services/notif
 import { ProjectMonitor } from '../../src/services/project-monitor.js';
 import { RouterIdentity } from '../../src/services/router-identity.js';
 import { RoutingRuleRepository } from '../../src/database/repository/routing-rule-repository.js';
+import { DshLlmCatalogAdapter } from '../../src/adapters/dsh-llm-catalog.js';
 import { SchedulerService } from '../../src/services/scheduler.js';
 import { TaskManager } from '../../src/services/task-manager.js';
 import { ThreadSubscriptionRepository } from '../../src/database/repository/thread-subscription-repository.js';
@@ -60,6 +61,7 @@ async function buildStack(): Promise<{ stack: SupervisorStack; notices: SentNoti
     notifier,
     routerIdentity: new RouterIdentity(db, ROUTER_SESSION),
     routingRules: new RoutingRuleRepository(db),
+    llmCatalog: new DshLlmCatalogAdapter(fakeCtx),
   } as unknown as SupervisorStack;
   return { stack, notices };
 }

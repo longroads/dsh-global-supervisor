@@ -15,6 +15,7 @@ import { SessionDirectNotifier, NotifierService } from '../../src/services/notif
 import { TaskManager } from '../../src/services/task-manager.js';
 import { WorkspaceManager } from '../../src/services/workspace-manager.js';
 import { EventRouter } from '../../src/services/event-router.js';
+import { DshLlmCatalogAdapter } from '../../src/adapters/dsh-llm-catalog.js';
 import { RoutingRuleRepository } from '../../src/database/repository/routing-rule-repository.js';
 import { ThreadSubscriptionRepository } from '../../src/database/repository/thread-subscription-repository.js';
 import type { SupervisorStack } from '../../src/runtime.js';
@@ -31,9 +32,24 @@ function execOf(sessionId: string): ToolRunContext {
   return { agent: { id: sessionId }, signal: new AbortController().signal } as unknown as ToolRunContext;
 }
 
-/** 手工组装服务栈（内存库 + fake ctx；workspaceRegistry 提供 list/resolveByPath/create 假实现）。 */
+/** Agent 服务间谍：live 会话上捕获 model.select / followup / steer 调用。 */
+const agentSpies = {
+  selects: [] as Array<Record<string, unknown>>,
+  followups: [] as string[],
+  steers: [] as string[],
+};
+
+function textOf(message: unknown): string {
+  const content = (message as { content?: Array<{ text?: string }> }).content;
+  return content?.[0]?.text ?? '';
+}
+
+/** 手工组装服务栈（内存库 + fake ctx；workspaceRegistry/agents/llm 提供假实现）。 */
 async function buildStack(): Promise<SupervisorStack> {
   const db = await openDatabase(':memory:');
+  agentSpies.selects.length = 0;
+  agentSpies.followups.length = 0;
+  agentSpies.steers.length = 0;
   const workspaces = [{ id: 'ws-1', path: 'E:\\proj\\p1', title: 'P1', sessionIds: [WORKER_SESSION], createdAt: '', updatedAt: '' }];
   const registry = {
     list: () => [...workspaces],
@@ -44,7 +60,29 @@ async function buildStack(): Promise<SupervisorStack> {
       return created;
     },
   };
-  const fakeCtx = { get: (name: string) => (name === 'workspaceRegistry' ? registry : {}) } as unknown as Context;
+  const liveAgent = {
+    id: WORKER_SESSION,
+    status: 'idle',
+    options: {},
+    model: { select: (selection: Record<string, unknown>) => { agentSpies.selects.push(selection); }, current: () => undefined },
+    followup: (message: unknown) => { agentSpies.followups.push(textOf(message)); },
+    steer: (message: unknown) => { agentSpies.steers.push(textOf(message)); },
+    cancel: () => undefined,
+    whenIdle: async () => undefined,
+  };
+  const agentsService = {
+    get: (sessionId: string) => (sessionId === WORKER_SESSION ? liveAgent : undefined),
+    list: () => [liveAgent],
+    resume: async () => ({ agent: liveAgent }),
+  };
+  const llmService = {
+    listProviders: () => [{ id: 'p1', name: 'Provider One' }],
+    listModels: async (provider: string) => (provider === 'p1' ? [{ id: 'm1', name: 'Model One' }, { id: 'm2', name: 'Model Two' }] : []),
+  };
+  const fakeCtx = {
+    get: (name: string) =>
+      name === 'workspaceRegistry' ? registry : name === 'agents' ? agentsService : name === 'llm' ? llmService : {},
+  } as unknown as Context;
   const agentAdapter = new DshAgentAdapter(fakeCtx);
   const taskManager = new TaskManager(db);
   taskManager.projects.create({ id: 'proj-1', workspaceId: 'ws-1', name: 'P1', workerSessionId: WORKER_SESSION });
@@ -65,6 +103,7 @@ async function buildStack(): Promise<SupervisorStack> {
     ),
     routerIdentity: new RouterIdentity(db, ROUTER_SESSION),
     routingRules: new RoutingRuleRepository(db),
+    llmCatalog: new DshLlmCatalogAdapter(fakeCtx),
     // 派发目标用空实现替身：工具层测试不依赖真实 Agent 服务（派发失败会降级 pending，掩盖路由结果）
     eventRouter: new EventRouter(db, { dispatch: async () => undefined }, () => ROUTER_SESSION),
   };
@@ -317,6 +356,110 @@ describe('supervisor 工具权限与任务流', () => {
     expect(links.event_ids).toContain('wh-1');
     const noAnchor = await recall.execute({}, execOf(ROUTER_SESSION));
     expect((noAnchor as { ok: boolean }).ok).toBe(false);
+  });
+
+  it('supervisor_task_steer：运行中任务插入纠偏并留审计；非 running 拒绝', async () => {
+    const stack = await buildStack();
+    const tools = buildSupervisorTools(stack);
+    const steer = tools.find((t) => t.name === 'supervisor_task_steer') as ToolDefinition;
+    const pending = stack.taskManager.createTask({ projectId: 'proj-1', title: 'T' }, { sessionId: ROUTER_SESSION, role: 'router' });
+    const denied = await steer.execute({ task_id: pending.id, text: '换个方向' }, execOf(ROUTER_SESSION));
+    expect((denied as { ok: boolean }).ok).toBe(false);
+    expect((denied as { error: string }).error).toContain('task-not-running');
+
+    stack.taskManager.enqueue(pending.id, { sessionId: ROUTER_SESSION, role: 'router' });
+    stack.taskManager.markDispatched(pending.id, WORKER_SESSION, null);
+    const steered = await steer.execute({ task_id: pending.id, text: '重点看兼容性矩阵' }, execOf(ROUTER_SESSION));
+    expect((steered as { ok: boolean }).ok).toBe(true);
+    expect(agentSpies.steers).toHaveLength(1);
+    expect(agentSpies.steers[0]).toContain('兼容性矩阵');
+    expect(stack.taskManager.audit.byTarget('task', pending.id).some((a) => a.action === 'task.steer')).toBe(true);
+  });
+
+  it('supervisor_model_set 项目锚点：写偏好、目录校验通过，派发时应用 select', async () => {
+    const stack = await buildStack();
+    const tools = buildSupervisorTools(stack);
+    const modelSet = tools.find((t) => t.name === 'supervisor_model_set') as ToolDefinition;
+    const result = await modelSet.execute({ workspace_id: 'ws-1', provider: 'p1', model: 'm1' }, execOf(ROUTER_SESSION));
+    expect((result as { ok: boolean }).ok).toBe(true);
+    expect((result as { scope: string }).scope).toBe('project');
+    expect((result as { catalog_checked: boolean }).catalog_checked).toBe(true);
+    expect(stack.taskManager.projects.byId('proj-1')?.model_pref_json).toBe('{"provider":"p1","model":"m1"}');
+
+    const task = stack.taskManager.createTask({ projectId: 'proj-1', title: 'T' }, { sessionId: ROUTER_SESSION, role: 'router' });
+    stack.taskManager.enqueue(task.id, { sessionId: ROUTER_SESSION, role: 'router' });
+    const dispatch = await stack.agentController.dispatchTask(task.id);
+    expect(dispatch.dispatched).toBe(true);
+    expect(agentSpies.selects).toHaveLength(1);
+    expect(agentSpies.selects[0]).toEqual({ provider: 'p1', model: 'm1' });
+  });
+
+  it('supervisor_model_set 任务锚点优先于项目偏好；clear 语义正确', async () => {
+    const stack = await buildStack();
+    const tools = buildSupervisorTools(stack);
+    const modelSet = tools.find((t) => t.name === 'supervisor_model_set') as ToolDefinition;
+    await modelSet.execute({ project_id: 'proj-1', provider: 'p1', model: 'm1' }, execOf(ROUTER_SESSION));
+    const task = stack.taskManager.createTask({ projectId: 'proj-1', title: 'T' }, { sessionId: ROUTER_SESSION, role: 'router' });
+    await modelSet.execute({ task_id: task.id, provider: 'p1', model: 'm2', reasoning_effort: 'high' }, execOf(ROUTER_SESSION));
+    expect(stack.taskManager.tasks.byId(task.id)?.model_pref_json).toContain('"reasoningEffort":"high"');
+
+    stack.taskManager.enqueue(task.id, { sessionId: ROUTER_SESSION, role: 'router' });
+    await stack.agentController.dispatchTask(task.id);
+    expect(agentSpies.selects).toHaveLength(1);
+    expect(agentSpies.selects[0]).toEqual({ provider: 'p1', model: 'm2', reasoningEffort: 'high' });
+
+    const cleared = await modelSet.execute({ task_id: task.id, clear: true }, execOf(ROUTER_SESSION));
+    expect((cleared as { ok: boolean }).ok).toBe(true);
+    expect((cleared as { cleared: string }).cleared).toBe('task');
+    expect(stack.taskManager.tasks.byId(task.id)?.model_pref_json).toBeNull();
+  });
+
+  it('supervisor_model_set 目录校验拒绝未知 provider/model；多锚点/无锚点拒绝', async () => {
+    const stack = await buildStack();
+    const tools = buildSupervisorTools(stack);
+    const modelSet = tools.find((t) => t.name === 'supervisor_model_set') as ToolDefinition;
+    const badProvider = await modelSet.execute({ project_id: 'proj-1', provider: 'px', model: 'm1' }, execOf(ROUTER_SESSION));
+    expect((badProvider as { ok: boolean }).ok).toBe(false);
+    expect((badProvider as { error: string }).error).toContain('provider 不在 llm 目录');
+    const badModel = await modelSet.execute({ project_id: 'proj-1', provider: 'p1', model: 'mx' }, execOf(ROUTER_SESSION));
+    expect((badModel as { ok: boolean }).ok).toBe(false);
+    expect((badModel as { error: string }).error).toContain('model 不在');
+    const noAnchor = await modelSet.execute({ provider: 'p1', model: 'm1' }, execOf(ROUTER_SESSION));
+    expect((noAnchor as { ok: boolean }).ok).toBe(false);
+    const twoAnchors = await modelSet.execute({ project_id: 'proj-1', task_id: 'task-x', provider: 'p1', model: 'm1' }, execOf(ROUTER_SESSION));
+    expect((twoAnchors as { ok: boolean }).ok).toBe(false);
+  });
+
+  it('supervisor_model_set session 锚点：live 立即 select，冷会话 live:false', async () => {
+    const stack = await buildStack();
+    const tools = buildSupervisorTools(stack);
+    const modelSet = tools.find((t) => t.name === 'supervisor_model_set') as ToolDefinition;
+    const live = await modelSet.execute({ session_id: WORKER_SESSION, provider: 'p1', model: 'm2' }, execOf(ROUTER_SESSION));
+    expect((live as { ok: boolean }).ok).toBe(true);
+    expect((live as { live: boolean }).live).toBe(true);
+    expect(agentSpies.selects).toHaveLength(1);
+    expect(agentSpies.selects[0]).toEqual({ provider: 'p1', model: 'm2' });
+    const cold = await modelSet.execute({ session_id: 'session-nowhere', provider: 'p1', model: 'm2' }, execOf(ROUTER_SESSION));
+    expect((cold as { ok: boolean }).ok).toBe(true);
+    expect((cold as { live: boolean }).live).toBe(false);
+    const clearSession = await modelSet.execute({ session_id: WORKER_SESSION, clear: true }, execOf(ROUTER_SESSION));
+    expect((clearSession as { ok: boolean }).ok).toBe(false);
+  });
+
+  it('supervisor_model_list：目录可达返回清单；不可达结构化降级', async () => {
+    const stack = await buildStack();
+    const tools = buildSupervisorTools(stack);
+    const modelList = tools.find((t) => t.name === 'supervisor_model_list') as ToolDefinition;
+    const okResult = await modelList.execute({}, execOf(ROUTER_SESSION));
+    expect((okResult as { ok: boolean }).ok).toBe(true);
+    const providers = (okResult as { providers: Array<{ provider: string; models: Array<{ id: string }> }> }).providers;
+    expect(providers).toHaveLength(1);
+    expect(providers[0]?.models.map((m) => m.id)).toEqual(['m1', 'm2']);
+
+    stack.llmCatalog = { list: async () => undefined } as unknown as typeof stack.llmCatalog;
+    const degraded = await modelList.execute({}, execOf(ROUTER_SESSION));
+    expect((degraded as { ok: boolean }).ok).toBe(false);
+    expect((degraded as { error: string }).error).toContain('llm 目录不可达');
   });
 });
 

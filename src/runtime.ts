@@ -5,6 +5,7 @@
 import type { Context } from '@deepseek-ai/cordis';
 import { DshAgentAdapter } from './adapters/dsh-agent.js';
 import { DshImNotifierAdapter } from './adapters/dsh-im-notifier.js';
+import { DshLlmCatalogAdapter } from './adapters/dsh-llm-catalog.js';
 import { DshScheduleAdapter } from './adapters/dsh-schedule.js';
 import { DshSessionAdapter } from './adapters/dsh-session.js';
 import { DshWorkspaceAdapter } from './adapters/dsh-workspace.js';
@@ -38,6 +39,7 @@ export interface SupervisorStack {
   notifier: NotifierService;
   routerIdentity: RouterIdentity;
   routingRules: RoutingRuleRepository;
+  llmCatalog: DshLlmCatalogAdapter;
 }
 
 /** 数据库文件名（位于插件数据目录下）。 */
@@ -100,6 +102,7 @@ export async function createStack(ctx: Context, options: { dataDir?: string; rou
     notifier,
     routerIdentity,
     routingRules: new RoutingRuleRepository(db),
+    llmCatalog: new DshLlmCatalogAdapter(ctx),
   };
 }
 

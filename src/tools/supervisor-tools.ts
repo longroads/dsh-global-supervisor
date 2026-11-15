@@ -495,6 +495,125 @@ export function buildSupervisorTools(stack: SupervisorStack): ToolDefinition[] {
     },
   }));
 
+  tools.push(makeTool({
+    name: 'supervisor_task_steer',
+    description: '向运行中任务的 Worker 会话插入纠偏指令（当前轮的下一个模型步生效，不打断进行中的工具调用）。适用于方向修正/补充上下文，无需取消重派',
+    parameters: OBJ({
+      task_id: { type: 'string' },
+      text: { type: 'string', description: '纠偏指令内容' },
+    }, ['task_id', 'text']),
+    resultSchema: RESULT,
+    guard, guardDeniedMessage: DENIED,
+    timeoutMs: 30_000,
+    handler: async (args, ctx) => {
+      const record = asRecord(args);
+      const taskId = stringArg(record, 'task_id');
+      const text = stringArg(record, 'text');
+      if (text.trim() === '') return { ok: false, error: 'text 不能为空' };
+      const task = stack.taskManager.tasks.byId(taskId);
+      if (!task) return { ok: false, error: `task-not-found: ${taskId}` };
+      if (task.status !== 'running') return { ok: false, error: `task-not-running: 当前状态 ${task.status}（steer 仅适用于运行中任务）` };
+      if (!task.assigned_session_id) return { ok: false, error: 'no-assigned-session' };
+      const steered = await stack.agentController.steerTask(taskId, text, { sessionId: ctx.callerSessionId, role: 'router' });
+      return steered ? { ok: true, task_id: taskId } : { ok: false, error: 'steer-failed' };
+    },
+  }));
+
+  tools.push(makeTool({
+    name: 'supervisor_model_set',
+    description: '设置模型偏好以优化 token 成本（分级用模）。锚点四选一：project_id/workspace_id → 项目默认（该项目每次派发生效）；task_id → 任务覆盖（该任务派发生效）；session_id → 立即切换 live 会话（持久化进会话日志，冷会话返回 live:false 待下次派发）。偏好解析顺序 task > project。clear=true 清除 project/task 偏好。注意：切换在任务边界最省 token（KV-cache 前缀重编码）；弱模型可能影响 worker_report 汇报质量，建议只对巡检类任务降档',
+    parameters: OBJ({
+      project_id: { type: 'string' },
+      workspace_id: { type: 'string', description: '与 project_id 等价（自动解析受管项目）' },
+      task_id: { type: 'string' },
+      session_id: { type: 'string', description: '立即切换的会话 ID' },
+      provider: { type: 'string', description: 'llm provider 路由名（supervisor_model_list 可查）' },
+      model: { type: 'string', description: '模型 ID' },
+      reasoning_effort: { type: 'string', description: '推理档（可选，模型支持时生效）' },
+      clear: { type: 'boolean', description: '清除 project/task 偏好（不适用于 session_id）' },
+    }),
+    resultSchema: RESULT,
+    guard, guardDeniedMessage: DENIED,
+    handler: async (args, ctx) => {
+      const record = asRecord(args);
+      const projectId = optionalStringArg(record, 'project_id');
+      const workspaceId = optionalStringArg(record, 'workspace_id');
+      const taskId = optionalStringArg(record, 'task_id');
+      const sessionId = optionalStringArg(record, 'session_id');
+      const anchors = [projectId, workspaceId, taskId, sessionId].filter((a) => a !== undefined);
+      if (anchors.length !== 1) {
+        return { ok: false, error: '锚点四选一：project_id / workspace_id / task_id / session_id（恰提供一个）' };
+      }
+      const clear = record['clear'] === true;
+      if (clear && sessionId !== undefined) {
+        return { ok: false, error: 'clear 不适用于 session_id（会话选择记录在会话日志，不经本插件清除）' };
+      }
+      if (sessionId !== undefined) {
+        const provider = stringArg(record, 'provider');
+        const model = stringArg(record, 'model');
+        if (provider === '' || model === '') return { ok: false, error: 'session_id 锚点需要 provider 与 model' };
+        const check = await stack.llmCatalog.validate(provider, model);
+        if (!check.ok) return { ok: false, error: check.reason, catalog_checked: true };
+        const selection = { provider, model, ...(optionalStringArg(record, 'reasoning_effort') !== undefined ? { reasoningEffort: optionalStringArg(record, 'reasoning_effort') } : {}) };
+        const live = await stack.agentController.applySessionModel(sessionId, selection);
+        return { ok: true, live, catalog_checked: check.catalogChecked };
+      }
+      let resolvedProjectId: string | undefined;
+      if (projectId !== undefined) resolvedProjectId = projectId;
+      else if (workspaceId !== undefined) {
+        const project = await stack.workspaceManager.projectByWorkspace(workspaceId);
+        if (!project) return { ok: false, error: `workspace 未纳管：${workspaceId}` };
+        resolvedProjectId = project.projectId;
+      }
+      if (clear) {
+        if (resolvedProjectId !== undefined) {
+          stack.taskManager.projects.update(resolvedProjectId, { modelPrefJson: null });
+          stack.taskManager.audit.log({ actorSessionId: ctx.callerSessionId, actorRole: 'router', action: 'model.pref.clear', targetType: 'project', targetId: resolvedProjectId });
+          return { ok: true, cleared: 'project' };
+        }
+        const taskKey = taskId as string;
+        const task = stack.taskManager.tasks.byId(taskKey);
+        if (!task) return { ok: false, error: `task-not-found: ${taskKey}` };
+        stack.taskManager.tasks.setModelPref(taskKey, null);
+        stack.taskManager.audit.log({ actorSessionId: ctx.callerSessionId, actorRole: 'router', action: 'model.pref.clear', targetType: 'task', targetId: taskKey });
+        return { ok: true, cleared: 'task' };
+      }
+      const provider = stringArg(record, 'provider');
+      const model = stringArg(record, 'model');
+      if (provider === '' || model === '') return { ok: false, error: '需要 provider 与 model' };
+      const check = await stack.llmCatalog.validate(provider, model);
+      if (!check.ok) return { ok: false, error: check.reason, catalog_checked: true };
+      const effort = optionalStringArg(record, 'reasoning_effort');
+      const prefJson = JSON.stringify(effort !== undefined ? { provider, model, reasoningEffort: effort } : { provider, model });
+      if (resolvedProjectId !== undefined) {
+        stack.taskManager.projects.update(resolvedProjectId, { modelPrefJson: prefJson });
+        stack.taskManager.audit.log({ actorSessionId: ctx.callerSessionId, actorRole: 'router', action: 'model.pref.set', targetType: 'project', targetId: resolvedProjectId, detailJson: prefJson });
+        return { ok: true, scope: 'project', catalog_checked: check.catalogChecked };
+      }
+      const taskKey = taskId as string;
+      const task = stack.taskManager.tasks.byId(taskKey);
+      if (!task) return { ok: false, error: `task-not-found: ${taskKey}` };
+      stack.taskManager.tasks.setModelPref(taskKey, prefJson);
+      stack.taskManager.audit.log({ actorSessionId: ctx.callerSessionId, actorRole: 'router', action: 'model.pref.set', targetType: 'task', targetId: taskKey, detailJson: prefJson });
+      return { ok: true, scope: 'task', catalog_checked: check.catalogChecked };
+    },
+  }));
+
+  tools.push(makeTool({
+    name: 'supervisor_model_list',
+    description: '列出可用模型目录（provider × 模型），供 supervisor_model_set 填参。目录来自 DSH llm 服务；不可达时返回结构化降级提示（可直接按 provider 配置填写）',
+    parameters: OBJ({}),
+    resultSchema: RESULT,
+    guard, guardDeniedMessage: DENIED,
+    handler: async () => {
+      const catalog = await stack.llmCatalog.list();
+      if (catalog === undefined) {
+        return { ok: false, error: 'llm 目录不可达（dsh-llm 服务未就绪）——降级：supervisor_model_set 仍可直填 provider/model（catalog_checked 将为 false）' };
+      }
+      return { ok: true, providers: catalog };
+    },
+  }));
+
   return tools;
 }
 
