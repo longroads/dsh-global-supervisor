@@ -5,6 +5,7 @@ import { ProjectRepository } from '../../src/database/repository/project-reposit
 import { TaskRepository } from '../../src/database/repository/task-repository.js';
 import { ThreadSubscriptionRepository } from '../../src/database/repository/thread-subscription-repository.js';
 import { EventManager } from '../../src/services/event-manager.js';
+import { EventBatcher } from '../../src/services/event-batcher.js';
 import { EventRouter } from '../../src/services/event-router.js';
 import type { EventDispatchTarget } from '../../src/services/event-router.js';
 import type { EventRow } from '../../src/types/index.js';
@@ -238,6 +239,30 @@ describe('EventRouter Thread 直通', () => {
     const all = router.listEventsWithStatus(undefined, 10, undefined);
     expect(all.find((e) => e.event_id === 'wh-t6')?.status).toBe('passed_through');
     expect(router.listEventsWithStatus(undefined, 10, 'passed_through')).toHaveLength(1);
+    db.close();
+  });
+});
+
+describe('EventRouter 批式路由（Phase 5-A）', () => {
+  it('route_to_router 命中批处理器：合投不经直发通道，审计带 batched 标记', async () => {
+    const { db, calls } = await setup();
+    const batchCalls: Array<{ sessionId: string; text: string }> = [];
+    const batcher = new EventBatcher(
+      { dispatch: async (sessionId: string, text: string) => { batchCalls.push({ sessionId, text }); } },
+      () => ROUTER,
+      { maxBatch: 1, debounceMs: 10 },
+    );
+    const batchedRouter = new EventRouter(db, { dispatch: async () => undefined }, () => ROUTER, batcher);
+    await batchedRouter.saveRule({ sourcePattern: 'webhook.*', action: 'route_to_router' }, ROUTER);
+    batchedRouter.setMode('auto', ROUTER);
+    const outcome = await batchedRouter.route(whEvent('wh-b1'));
+    expect(outcome).toBe('event.routed');
+    expect(calls).toHaveLength(0);
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(batchCalls).toHaveLength(1);
+    expect(batchCalls[0]?.text).toContain('wh-b1');
+    const detail = JSON.parse(new AuditRepository(db).byTarget('event', 'wh-b1')[0]?.detail_json ?? '{}') as { batched?: boolean };
+    expect(detail.batched).toBe(true);
     db.close();
   });
 });

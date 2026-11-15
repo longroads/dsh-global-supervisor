@@ -9,7 +9,9 @@ import { DshScheduleAdapter } from './adapters/dsh-schedule.js';
 import { DshSessionAdapter } from './adapters/dsh-session.js';
 import { DshWorkspaceAdapter } from './adapters/dsh-workspace.js';
 import type { DatabaseSync } from 'node:sqlite';
+import { AuditRepository } from './database/repository/audit-repository.js';
 import { EventManager } from './services/event-manager.js';
+import { EventBatcher } from './services/event-batcher.js';
 import { EventRouter } from './services/event-router.js';
 import { AgentController } from './services/agent-controller.js';
 import { ProjectMonitor } from './services/project-monitor.js';
@@ -58,7 +60,6 @@ export async function createStack(ctx: Context, options: { dataDir?: string; rou
   const workspaceManager = new WorkspaceManager(workspaceAdapter, db);
   const agentController = new AgentController(agentAdapter, taskManager, db);
   const scheduler = new SchedulerService(scheduleAdapter, db);
-  const monitor = new ProjectMonitor(taskManager, agentController);
   const routerIdentity = new RouterIdentity(db, options.routerSessionId ?? '', async (sessionId, workspaceId) => {
     const workspace = await workspaceAdapter.getWorkspace(workspaceId);
     return workspace?.sessionIds.includes(sessionId) ?? false;
@@ -69,7 +70,21 @@ export async function createStack(ctx: Context, options: { dataDir?: string; rou
     botId: options.notifier?.botId ?? '',
     targetId: options.notifier?.targetId ?? 'supervisor-alerts',
   });
-  const eventRouter = new EventRouter(db, agentAdapter, () => routerIdentity.ownerSessionId());
+  const audit = new AuditRepository(db);
+  const eventBatcher = new EventBatcher(agentAdapter, () => routerIdentity.ownerSessionId(), {}, (error, batchSize) => {
+    audit.log({
+      actorRole: 'system',
+      action: 'event.batch-failed',
+      targetType: 'eventBatch',
+      targetId: `batch-${Date.now()}`,
+      detailJson: JSON.stringify({ batchSize, message: error instanceof Error ? error.message : String(error) }),
+    });
+  });
+  const eventRouter = new EventRouter(db, agentAdapter, () => routerIdentity.ownerSessionId(), eventBatcher);
+  const monitor = new ProjectMonitor(taskManager, agentController, undefined, {
+    agents: agentAdapter,
+    notify: (message, severity) => notifier.notify(message, severity),
+  });
 
   return {
     db,

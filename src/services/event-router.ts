@@ -11,6 +11,7 @@ import type { EventRoutingAction, EventRoutingRuleRow } from '../database/reposi
 import { PluginSettingRepository } from '../database/repository/plugin-setting-repository.js';
 import { ThreadSubscriptionRepository } from '../database/repository/thread-subscription-repository.js';
 import type { ThreadSubscriber } from '../database/repository/thread-subscription-repository.js';
+import type { EventBatcher } from './event-batcher.js';
 import type { EventRow } from '../types/index.js';
 
 /** 事件派发目标（DshAgentAdapter 的 dispatch 最小面，便于测试替身）。 */
@@ -44,6 +45,8 @@ export class EventRouter {
     db: DatabaseSync,
     private readonly agents: EventDispatchTarget,
     private readonly resolveRouterSession: () => string,
+    /** 可选批处理器：route_to_router 命中时合批投递（Phase 5-A，缺省直发） */
+    private readonly batcher?: EventBatcher,
   ) {
     this.rules = new EventRoutingRuleRepository(db);
     this.settings = new PluginSettingRepository(db);
@@ -99,6 +102,17 @@ export class EventRouter {
     if (rule.action === 'ignore') {
       this.audit.log({ actorRole: 'system', action: 'event.ignored', targetType: 'event', targetId: event.event_id, detailJson: JSON.stringify({ ruleId: rule.id, pattern: rule.source_pattern }) });
       return 'event.ignored';
+    }
+    if (rule.action === 'route_to_router' && this.batcher !== undefined) {
+      this.batcher.add(event);
+      this.audit.log({
+        actorRole: 'system',
+        action: 'event.routed',
+        targetType: 'event',
+        targetId: event.event_id,
+        detailJson: JSON.stringify({ ruleId: rule.id, pattern: rule.source_pattern, action: rule.action, batched: true }),
+      });
+      return 'event.routed';
     }
     const targetSession = rule.action === 'route_to_worker' ? rule.target_session_id : this.resolveRouterSession();
     if (!targetSession) {
