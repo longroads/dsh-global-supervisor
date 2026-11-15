@@ -9,6 +9,7 @@ import { DshSessionAdapter } from './adapters/dsh-session.js';
 import { DshWorkspaceAdapter } from './adapters/dsh-workspace.js';
 import type { DatabaseSync } from 'node:sqlite';
 import { EventManager } from './services/event-manager.js';
+import { EventRouter } from './services/event-router.js';
 import { AgentController } from './services/agent-controller.js';
 import { ProjectMonitor } from './services/project-monitor.js';
 import { RouterIdentity } from './services/router-identity.js';
@@ -27,6 +28,7 @@ export interface SupervisorStack {
   agentController: AgentController;
   scheduler: SchedulerService;
   eventManager: EventManager;
+  eventRouter: EventRouter;
   sessionAdapter: DshSessionAdapter;
   monitor: ProjectMonitor;
   notifier: SessionDirectNotifier;
@@ -60,6 +62,7 @@ export async function createStack(ctx: Context, options: { dataDir?: string; rou
     return workspace?.sessionIds.includes(sessionId) ?? false;
   });
   const notifier = new SessionDirectNotifier(agentAdapter, () => routerIdentity.ownerSessionId());
+  const eventRouter = new EventRouter(db, agentAdapter, () => routerIdentity.ownerSessionId());
 
   return {
     db,
@@ -69,6 +72,7 @@ export async function createStack(ctx: Context, options: { dataDir?: string; rou
     agentController,
     scheduler,
     eventManager,
+    eventRouter,
     sessionAdapter,
     monitor,
     notifier,

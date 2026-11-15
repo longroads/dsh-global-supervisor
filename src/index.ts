@@ -214,6 +214,10 @@ export function apply(ctx: Context, config: PluginConfig): void {
             if (task.assigned_session_id === payload.sessionId) stack.taskManager.tasks.touchReport(task.id);
           }
         });
+        // Phase 2 事件路由决策层（'*' 全量通配；route 内部永不抛错，派发失败降级 pending 记审计）
+        stack.eventManager.on('*', (event) => {
+          void stack.eventRouter.route(event);
+        });
         // 设置面板 HTTP API（Router 身份管理入口；契约见 docs/UI_PANEL_PLAN.md）
         const { registerSettingsApi } = await import('./services/settings-api.js');
         await registerSettingsApi(ctx, stack, config.events);

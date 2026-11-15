@@ -48,7 +48,7 @@ export class EventManager {
     this.repository = new EventRepository(db);
   }
 
-  /** 注册处理器：type 精确匹配，或以 `.*` 结尾的前缀匹配（如 `schedule.*`）。 */
+  /** 注册处理器：type 精确匹配、尾缀 `.*` 前缀匹配（如 `schedule.*`）、或裸 `*` 全量匹配。 */
   on(pattern: string, handler: EventHandler): void {
     const list = this.handlers.get(pattern) ?? [];
     list.push(handler);
@@ -91,11 +91,11 @@ export class EventManager {
     return { inserted: true, dispatched: matched.length, errors };
   }
 
-  /** 按 type 匹配的 handler 列表（精确 + 前缀通配）。 */
+  /** 按 type 匹配的 handler 列表（精确 + 前缀通配 + 裸 * 全量）。 */
   private matchingHandlers(type: string): EventHandler[] {
     const result: EventHandler[] = [];
     for (const [pattern, list] of this.handlers) {
-      if (pattern === type || (pattern.endsWith('.*') && type.startsWith(pattern.slice(0, -1)))) {
+      if (pattern === '*' || pattern === type || (pattern.endsWith('.*') && type.startsWith(pattern.slice(0, -1)))) {
         result.push(...list);
       }
     }

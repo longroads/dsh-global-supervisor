@@ -68,6 +68,16 @@ describe('EventManager 去重与路由', () => {
     db.close();
   });
 
+  it('裸 * 全量通配 handler 命中所有类型', async () => {
+    const { manager, db } = await setup();
+    const seen: string[] = [];
+    manager.on('*', (e) => { seen.push(e.type); });
+    await manager.ingest({ eventId: 'star-1', source: 'system', type: 'task.timeout' });
+    await manager.ingest({ eventId: 'star-2', source: 'agent', type: 'user.message' });
+    expect(seen).toEqual(['task.timeout', 'user.message']);
+    db.close();
+  });
+
   it('路由元数据（thread/channel/actor/human）随事件落库', async () => {
     const { manager, db } = await setup();
     await manager.ingest({
