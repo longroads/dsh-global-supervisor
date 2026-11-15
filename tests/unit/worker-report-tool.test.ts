@@ -1,0 +1,112 @@
+import { describe, expect, it } from 'vitest';
+import type { Context } from '@deepseek-ai/cordis';
+import type { ToolRunContext } from '@deepseek-ai/dsh-tools';
+import { openDatabase } from '../../src/database/connection.js';
+import { DshAgentAdapter } from '../../src/adapters/dsh-agent.js';
+import { DshScheduleAdapter } from '../../src/adapters/dsh-schedule.js';
+import { DshSessionAdapter } from '../../src/adapters/dsh-session.js';
+import { DshWorkspaceAdapter } from '../../src/adapters/dsh-workspace.js';
+import { AgentController } from '../../src/services/agent-controller.js';
+import { EventManager } from '../../src/services/event-manager.js';
+import { EventRouter } from '../../src/services/event-router.js';
+import { NotifierService, SessionDirectNotifier } from '../../src/services/notifier.js';
+import { ProjectMonitor } from '../../src/services/project-monitor.js';
+import { RouterIdentity } from '../../src/services/router-identity.js';
+import { RoutingRuleRepository } from '../../src/database/repository/routing-rule-repository.js';
+import { SchedulerService } from '../../src/services/scheduler.js';
+import { TaskManager } from '../../src/services/task-manager.js';
+import { ThreadSubscriptionRepository } from '../../src/database/repository/thread-subscription-repository.js';
+import { WorkspaceManager } from '../../src/services/workspace-manager.js';
+import type { SupervisorStack } from '../../src/runtime.js';
+import { buildWorkerReportTool } from '../../src/tools/worker-report-tool.js';
+
+const ROUTER_SESSION = 'session-router';
+const WORKER_SESSION = 'session-worker-a';
+
+interface SentNotice {
+  message: string;
+}
+
+/** 最小执行上下文（仅提供身份与取消信号）。 */
+function execOf(sessionId: string): ToolRunContext {
+  return { agent: { id: sessionId }, signal: new AbortController().signal } as unknown as ToolRunContext;
+}
+
+/** 组装服务栈并挂通知收集器（IM/会话两条通道均落到 notices）。 */
+async function buildStack(): Promise<{ stack: SupervisorStack; notices: SentNotice[] }> {
+  const db = await openDatabase(':memory:');
+  const fakeCtx = { get: () => ({}) } as unknown as Context;
+  const agentAdapter = new DshAgentAdapter(fakeCtx);
+  const taskManager = new TaskManager(db);
+  taskManager.projects.create({ id: 'proj-1', workspaceId: 'ws-1', name: 'P1', workerSessionId: WORKER_SESSION });
+  const notices: SentNotice[] = [];
+  // 夹具走 dsh-im 通道使通知落到收集器（IM 间谍返回 true，不触发会话降级）
+  const notifier = new NotifierService(
+    new SessionDirectNotifier(agentAdapter, () => ROUTER_SESSION),
+    { notify: async (message: string) => { notices.push({ message }); return true; } },
+    { type: 'dsh-im', botId: 'bot-test', targetId: 't-test' },
+  );
+  const stack: SupervisorStack = {
+    db,
+    dataDir: ':memory:',
+    taskManager,
+    workspaceManager: new WorkspaceManager(new DshWorkspaceAdapter(fakeCtx), db),
+    agentController: new AgentController(agentAdapter, taskManager, db),
+    scheduler: new SchedulerService(new DshScheduleAdapter(fakeCtx), db),
+    eventManager: new EventManager(db),
+    eventRouter: new EventRouter(db, { dispatch: async () => undefined }, () => ROUTER_SESSION),
+    sessionAdapter: new DshSessionAdapter(fakeCtx),
+    monitor: new ProjectMonitor(taskManager),
+    notifier,
+    routerIdentity: new RouterIdentity(db, ROUTER_SESSION),
+    routingRules: new RoutingRuleRepository(db),
+  } as unknown as SupervisorStack;
+  return { stack, notices };
+}
+
+describe('worker_report 通知（Phase 4）', () => {
+  it('need_human 汇报：推送警告级通知（含任务 ID）', async () => {
+    const { stack, notices } = await buildStack();
+    const tool = buildWorkerReportTool(stack);
+    const task = stack.taskManager.createTask({ projectId: 'proj-1', title: 'T' }, { sessionId: ROUTER_SESSION, role: 'router' });
+    stack.taskManager.enqueue(task.id, { sessionId: ROUTER_SESSION, role: 'router' });
+    stack.taskManager.markDispatched(task.id, WORKER_SESSION, null);
+    await tool.execute(
+      { workspace_id: 'ws-1', task_id: task.id, status: 'need_human', need_human: true, summary: '需要确认部署方案' },
+      execOf(WORKER_SESSION),
+    );
+    expect(notices).toHaveLength(1);
+    expect(notices[0]?.message).toContain('【警告】');
+    expect(notices[0]?.message).toContain(task.id);
+  });
+
+  it('完成且任务带 channel_ref：经该信道回复完成摘要', async () => {
+    const { stack, notices } = await buildStack();
+    stack.eventManager.ingest({ eventId: 'wh-1', source: 'im', type: 'issue.opened', channelRef: 'im:feishu:chat-1' });
+    const tool = buildWorkerReportTool(stack);
+    const task = stack.taskManager.createTask({ projectId: 'proj-1', title: 'T', sourceEventId: 'wh-1' }, { sessionId: ROUTER_SESSION, role: 'router' });
+    expect(task.channel_ref).toBe('im:feishu:chat-1');
+    stack.taskManager.enqueue(task.id, { sessionId: ROUTER_SESSION, role: 'router' });
+    stack.taskManager.markDispatched(task.id, WORKER_SESSION, null);
+    await tool.execute(
+      { workspace_id: 'ws-1', task_id: task.id, status: 'completed', progress: 100, summary: '已完成' },
+      execOf(WORKER_SESSION),
+    );
+    expect(notices).toHaveLength(1);
+    expect(notices[0]?.message).toContain('【通知】');
+    expect(notices[0]?.message).toContain(task.id);
+  });
+
+  it('完成但任务无 channel_ref：不发完成通知', async () => {
+    const { stack, notices } = await buildStack();
+    const tool = buildWorkerReportTool(stack);
+    const task = stack.taskManager.createTask({ projectId: 'proj-1', title: 'T' }, { sessionId: ROUTER_SESSION, role: 'router' });
+    stack.taskManager.enqueue(task.id, { sessionId: ROUTER_SESSION, role: 'router' });
+    stack.taskManager.markDispatched(task.id, WORKER_SESSION, null);
+    await tool.execute(
+      { workspace_id: 'ws-1', task_id: task.id, status: 'completed', progress: 100, summary: '已完成' },
+      execOf(WORKER_SESSION),
+    );
+    expect(notices).toHaveLength(0);
+  });
+});

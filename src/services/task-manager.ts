@@ -88,6 +88,7 @@ export class TaskManager {
     }
     const id = this.tasks.nextTaskId();
     const sourceEvent = input.sourceEventId !== undefined ? this.events.byEventId(input.sourceEventId) : undefined;
+    const channelRef = sourceEvent?.channel_ref ?? null;
     withTransaction(this.db, () => {
       this.tasks.create({
         id,
@@ -99,6 +100,7 @@ export class TaskManager {
         maxRetries: input.maxRetries,
         dueAt: input.dueAt,
         sourceEventId: input.sourceEventId,
+        channelRef: channelRef ?? undefined,
       });
       for (const dep of input.dependsOn ?? []) {
         this.tasks.addDependency(id, dep);
@@ -112,7 +114,7 @@ export class TaskManager {
         action: 'task.create',
         targetType: 'task',
         targetId: id,
-        detailJson: JSON.stringify({ sourceEventId: input.sourceEventId ?? null, threadId: sourceEvent?.thread_id ?? null }),
+        detailJson: JSON.stringify({ sourceEventId: input.sourceEventId ?? null, threadId: sourceEvent?.thread_id ?? null, channelRef }),
       });
     });
     return this.tasks.byId(id) as TaskRow;

@@ -52,7 +52,15 @@ export function buildWorkerReportTool(stack: SupervisorStack): ToolDefinition {
       if (outcome.accepted && report.needHuman) {
         void stack.notifier.notify(
           `任务 ${report.taskId} 需要人工决策：${report.summary ?? ''}${report.blockers.length > 0 ? `（阻碍：${report.blockers.join('；')}）` : ''}`,
+          'warning',
         );
+      }
+      // 来源事件带信道（channel_ref）的任务，完成时经该信道回复摘要（Phase 4 4-C）
+      if (outcome.accepted && outcome.taskStatus === 'completed') {
+        const task = stack.taskManager.tasks.byId(report.taskId);
+        if (task?.channel_ref) {
+          void stack.notifier.notify(`任务 ${task.id} 已完成：${report.summary ?? ''}`, 'info');
+        }
       }
       return outcome;
     },

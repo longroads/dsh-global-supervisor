@@ -245,3 +245,20 @@ describe('TaskManager Thread 订阅生命周期', () => {
     db.close();
   });
 });
+
+describe('TaskManager Channel 追踪', () => {
+  it('来源事件带 channel_ref：任务继承信道标识（完成时经该信道回复）', async () => {
+    const { manager, db } = await setup();
+    manager.events.ingest({ eventId: 'wh-1', source: 'im', type: 'issue.opened', channelRef: 'im:feishu:chat-1' });
+    const task = manager.createTask({ projectId: 'proj-1', title: 'T', sourceEventId: 'wh-1' }, ROUTER);
+    expect(task.channel_ref).toBe('im:feishu:chat-1');
+    db.close();
+  });
+
+  it('无来源事件：任务 channel_ref 为 null', async () => {
+    const { manager, db } = await setup();
+    const task = manager.createTask({ projectId: 'proj-1', title: 'T' }, ROUTER);
+    expect(task.channel_ref).toBeNull();
+    db.close();
+  });
+});

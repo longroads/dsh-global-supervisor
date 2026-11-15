@@ -212,6 +212,13 @@ export const MIGRATIONS: readonly Migration[] = [
       ALTER TABLE tasks ADD COLUMN source_event_id TEXT;
     `,
   },
+  {
+    version: 6,
+    name: 'tasks-channel-ref',
+    up: `
+      ALTER TABLE tasks ADD COLUMN channel_ref TEXT;
+    `,
+  },
 ];
 
 /** 迁移执行器：按 version 升序应用未执行的迁移，每条独立事务。 */
