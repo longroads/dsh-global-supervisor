@@ -111,7 +111,7 @@ function SupervisorPanel(): unknown {
       ? h('div', { style: style.row },
           h('span', { style: style.label }, '版本'),
           h('span', null, data.update.updateAvailable && data.update.latest
-            ? `发现新版本 v${data.update.latest}（当前 v${data.update.current}）。升级：dsh plugin --profile desktop update dsh-global-supervisor`
+            ? `发现新版本 v${data.update.latest}（当前 v${data.update.current}）。升级：dsh plugin --profile <profile名> update dsh-global-supervisor`
             : data.update.disabled
               ? `v${data.update.current}（更新检查已禁用）`
               : data.update.latest !== null
