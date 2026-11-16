@@ -7,10 +7,25 @@ import type { SessionPersistence } from '@deepseek-ai/dsh-session-persistence';
 import type { SessionId } from '@deepseek-ai/dsh-session';
 import { awaitService } from './host-services.js';
 
-/** 会话查询服务面（readTitleSnapshots = DSH 侧边栏会话名的同源读取）。 */
+/** 宿主折叠后的会话标题快照条目。 */
+type TitleSnapshot = { sessionId: SessionId; status: string; title?: { title: string; source: string } };
+
+/**
+ * 会话查询服务面（readTitleSnapshots = DSH 侧边栏会话名的同源读取）。
+ * 声明为可选：本宿主运行时该服务可能不提供此方法（实测 TypeError），
+ * 必须经能力探测确认后再调用，禁止盲目调用未 VERIFIED 接口。
+ */
 interface SessionQueryLike {
-  readTitleSnapshots(sessionIds: readonly SessionId[], signal?: AbortSignal): Promise<Array<{ sessionId: SessionId; status: string; title?: { title: string; source: string } }>>;
+  readTitleSnapshots?(sessionIds: readonly SessionId[], signal?: AbortSignal): Promise<TitleSnapshot[]>;
 }
+
+/**
+ * sessionQuery 标题能力探测结论（进程内只探一次并缓存）。
+ * 可用时缓存已绑定 this 的读取函数，调用点因此无需任何断言。
+ */
+type TitleCapability =
+  | { readonly available: true; readonly readTitleSnapshots: (sessionIds: readonly SessionId[], signal?: AbortSignal) => Promise<TitleSnapshot[]> }
+  | { readonly available: false; readonly reason: string };
 
 /** 会话快照纯数据视图。 */
 export interface SessionSnapshot {
@@ -22,14 +37,44 @@ export interface SessionSnapshot {
 }
 
 export class DshSessionAdapter {
+  /** 标题能力探测的进程内缓存（undefined = 尚未探测；并发调用共享同一次探测）。 */
+  private titleCapability: Promise<TitleCapability> | undefined;
+
   constructor(
     private readonly ctx: Context,
     /** projcache 目录注入（测试用；缺省 ~/.dsh/storages/session_projcache/sessions） */
     private readonly projcacheDir?: string,
+    /** 诊断行注入（测试用；缺省追加 ~/.dsh/global-supervisor-load.log） */
+    private readonly titleSink?: (line: string) => void,
   ) {}
 
   private persistence(): Promise<SessionPersistence> {
     return awaitService<SessionPersistence>(this.ctx, 'sessionPersistence');
+  }
+
+  /**
+   * 探测 sessionQuery 是否真的提供 readTitleSnapshots，结论与已解析的服务一起缓存。
+   * 只记录一次诊断日志；探测失败（服务未就绪/方法不存在）判为能力缺失，不抛出。
+   */
+  private probeTitleCapability(): Promise<TitleCapability> {
+    if (this.titleCapability === undefined) {
+      this.titleCapability = (async (): Promise<TitleCapability> => {
+        try {
+          const query = await awaitService<SessionQueryLike>(this.ctx, 'sessionQuery');
+          const readTitleSnapshots = query.readTitleSnapshots;
+          if (typeof readTitleSnapshots !== 'function') {
+            return { available: false, reason: 'sessionQuery 无 readTitleSnapshots 方法' };
+          }
+          return { available: true, readTitleSnapshots: (sessionIds, signal) => readTitleSnapshots.call(query, sessionIds, signal) };
+        } catch (error) {
+          return { available: false, reason: error instanceof Error ? error.message : String(error) };
+        }
+      })();
+      void this.titleCapability.then((capability) => {
+        this.logTitleDiagnostic([], new Map(), capability.available ? undefined : new Error(`title 能力缺失：${capability.reason}`));
+      });
+    }
+    return this.titleCapability;
   }
 
   /** 全部持久化会话快照（轻量头信息，不读完整事件日志）。 */
@@ -57,13 +102,15 @@ export class DshSessionAdapter {
 
   /**
    * 批量读取会话标题（与 DSH 侧边栏显示的会话名同源：log-backed session/title 折叠）。
-   * 服务不可用或读取失败时返回空 Map——调用方降级到派生标签；失败原因写入诊断日志。
+   * 能力缺失（本宿主实况）静默返回空 Map；读取失败返回空 Map 并记诊断日志——
+   * 两种情况调用方都降级到 projcache / 派生标签。
    */
   async readTitles(sessionIds: readonly string[]): Promise<Map<string, string>> {
     if (sessionIds.length === 0) return new Map();
+    const capability = await this.probeTitleCapability();
+    if (!capability.available) return new Map();
     try {
-      const query = await awaitService<SessionQueryLike>(this.ctx, 'sessionQuery');
-      const results = await query.readTitleSnapshots(sessionIds as SessionId[]);
+      const results = await capability.readTitleSnapshots(sessionIds as SessionId[]);
       const titles = new Map<string, string>();
       for (const item of results) {
         const title = item.title?.title;
@@ -116,18 +163,23 @@ export class DshSessionAdapter {
     }
   }
 
-  /** 标题读取诊断：写入 marker（排障用；单行追加，页面打开一次一条）。 */
+  /** 标题读取诊断：写入注入的 sink，缺省追加 marker 文件（排障用；单行追加）。 */
   private async logTitleDiagnostic(requested: readonly string[], obtained: Map<string, string>, error?: unknown): Promise<void> {
+    const detail = error !== undefined
+      ? `error:${error instanceof Error ? error.message : String(error)}`
+      : `ok:${obtained.size}/${requested.length}`;
+    const line = `${new Date().toISOString()} [title-lookup] ${detail}`;
+    if (this.titleSink !== undefined) {
+      this.titleSink(line);
+      return;
+    }
     try {
       const { appendFile, mkdir } = await import('node:fs/promises');
       const os = await import('node:os');
       const path = await import('node:path');
       const file = path.join(os.homedir(), '.dsh', 'global-supervisor-load.log');
       await mkdir(path.dirname(file), { recursive: true }).catch(() => undefined);
-      const detail = error !== undefined
-        ? `error:${error instanceof Error ? error.message : String(error)}`
-        : `ok:${obtained.size}/${requested.length}`;
-      await appendFile(file, `${new Date().toISOString()} [title-lookup] ${detail}\n`, 'utf8').catch(() => undefined);
+      await appendFile(file, `${line}\n`, 'utf8').catch(() => undefined);
     } catch {
       // 诊断自身失败不阻断主流程
     }
