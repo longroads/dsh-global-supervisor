@@ -1,3 +1,6 @@
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import type { Context } from '@deepseek-ai/cordis';
 import { openDatabase } from '../../src/database/connection.js';
@@ -32,7 +35,7 @@ function fakeCtxWithWebServer(): { ctx: Context; routes: CapturedRoute[] } {
   return { ctx, routes };
 }
 
-async function buildStack(ctx: Context): Promise<SupervisorStack> {
+async function buildStack(ctx: Context, projcacheDir?: string): Promise<SupervisorStack> {
   const db = await openDatabase(':memory:');
   const taskManager = new TaskManager(db);
   return {
@@ -41,7 +44,7 @@ async function buildStack(ctx: Context): Promise<SupervisorStack> {
     taskManager,
     routerIdentity: new RouterIdentity(db, ''),
     workspaceManager: new WorkspaceManager(new DshWorkspaceAdapter(ctx), db),
-    sessionAdapter: new DshSessionAdapter(ctx),
+    sessionAdapter: new DshSessionAdapter(ctx, projcacheDir),
     eventManager: new EventManager(db),
   } as unknown as SupervisorStack;
 }
@@ -79,6 +82,21 @@ describe('设置面板 HTTP API', () => {
     expect(payload.workspaces[0]?.id).toBe('ws-1');
     expect(payload.workspaces[0]?.sessions[0]?.id).toBe('s-1');
     expect(payload.workspaces[0]?.sessions[0]?.label).toContain('a · 20');
+  });
+
+  it('GET settings 会话名经 projcache 缓存解析（服务空 → 读 record.rows.title.val）', async () => {
+    const projcacheDir = mkdtempSync(join(tmpdir(), 'projcache-settings-'));
+    try {
+      writeFileSync(join(projcacheDir, 's-1.json'), JSON.stringify({ record: { rows: { title: { val: 'JumpServer 登录表单选择器配置咨询' } } } }), 'utf8');
+      const { ctx, routes } = fakeCtxWithWebServer();
+      const stack = await buildStack(ctx, projcacheDir);
+      await registerSettingsApi(ctx, stack);
+      const response = await routes[0]?.resource?.(new Request('http://x/global-supervisor/settings'));
+      const payload = (await response?.json()) as { workspaces: Array<{ sessions: Array<{ id: string; label: string }> }> };
+      expect(payload.workspaces[0]?.sessions[0]?.label).toBe('JumpServer 登录表单选择器配置咨询');
+    } finally {
+      rmSync(projcacheDir, { recursive: true, force: true });
+    }
   });
 
   it('POST claim：合法体指派成功并写入身份', async () => {

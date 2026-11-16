@@ -77,7 +77,9 @@ export async function registerSettingsApi(ctx: Context, stack: SupervisorStack, 
       const snapshots = await stack.sessionAdapter.listSnapshots();
       const labels = new Map(snapshots.map((s) => [s.sessionId, s]));
       const allSessionIds = overview.flatMap((item) => [...item.sessionIds]);
+      // 标题解析顺序：sessionQuery 服务（与侧边栏同源）→ projcache 缓存文件 → cwd/日期派生
       const titles = await stack.sessionAdapter.readTitles(allSessionIds);
+      const cached = await stack.sessionAdapter.readCachedTitles(allSessionIds);
       const claimed = stack.routerIdentity.current();
       const fallbackSession = stack.routerIdentity.ownerSessionId();
       const router: SettingsApiResponse['router'] = claimed
@@ -93,7 +95,7 @@ export async function registerSettingsApi(ctx: Context, stack: SupervisorStack, 
           path: item.path,
           sessions: item.sessionIds.map((id) => ({
             id,
-            label: titles.get(id) ?? sessionLabel(labels.get(id) ?? { sessionId: id }),
+            label: titles.get(id) ?? cached.get(id) ?? sessionLabel(labels.get(id) ?? { sessionId: id }),
           })),
         })),
       };

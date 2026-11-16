@@ -1,4 +1,7 @@
-import { describe, expect, it } from 'vitest';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterEach, describe, expect, it } from 'vitest';
 import type { Context } from '@deepseek-ai/cordis';
 import type { ToolDefinition, ToolRunContext } from '@deepseek-ai/dsh-tools';
 import { openDatabase } from '../../src/database/connection.js';
@@ -44,12 +47,24 @@ function textOf(message: unknown): string {
   return content?.[0]?.text ?? '';
 }
 
-/** 手工组装服务栈（内存库 + fake ctx；workspaceRegistry/agents/llm 提供假实现）。 */
+/** 夹具 projcache 临时目录登记（afterEach 统一清理）。 */
+const projcacheDirs: string[] = [];
+
+afterEach(() => {
+  for (const dir of projcacheDirs.splice(0)) {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+/** 手工组装服务栈（内存库 + fake ctx；workspaceRegistry/agents/llm 提供假实现；projcache 注入 tmp 目录）。 */
 async function buildStack(): Promise<SupervisorStack> {
   const db = await openDatabase(':memory:');
   agentSpies.selects.length = 0;
   agentSpies.followups.length = 0;
   agentSpies.steers.length = 0;
+  const projcacheDir = mkdtempSync(join(tmpdir(), 'projcache-tools-'));
+  projcacheDirs.push(projcacheDir);
+  writeFileSync(join(projcacheDir, `${WORKER_SESSION}.json`), JSON.stringify({ record: { rows: { title: { val: '切换cloud2bim会话模型为GLM-5.3' } } } }), 'utf8');
   const workspaces = [{ id: 'ws-1', path: 'E:\\proj\\p1', title: 'P1', sessionIds: [WORKER_SESSION], createdAt: '', updatedAt: '' }];
   const registry = {
     list: () => [...workspaces],
@@ -94,7 +109,7 @@ async function buildStack(): Promise<SupervisorStack> {
     agentController: new AgentController(agentAdapter, taskManager, db),
     scheduler: new SchedulerService(new DshScheduleAdapter(fakeCtx), db),
     eventManager: new EventManager(db),
-    sessionAdapter: new DshSessionAdapter(fakeCtx),
+    sessionAdapter: new DshSessionAdapter(fakeCtx, projcacheDir),
     monitor: new ProjectMonitor(taskManager),
     notifier: new NotifierService(
       new SessionDirectNotifier(agentAdapter, () => ROUTER_SESSION),
@@ -162,6 +177,16 @@ describe('makeTool 权限中间件', () => {
 });
 
 describe('supervisor 工具权限与任务流', () => {
+  it('workspace_get 返回 available_sessions（可读会话名，经 projcache 解析真实 title）——绑定 Worker 会话时从中选 session_id', async () => {
+    const stack = await buildStack();
+    const tools = buildSupervisorTools(stack);
+    const get = tools.find((t) => t.name === 'supervisor_workspace_get') as ToolDefinition;
+    const result = await get.execute({ workspace_id: 'ws-1' }, execOf(ROUTER_SESSION));
+    expect((result as { ok: boolean }).ok).toBe(true);
+    const sessions = (result as { available_sessions: Array<{ id: string; label: string }> }).available_sessions;
+    expect(sessions.some((s) => s.id === WORKER_SESSION && s.label === '切换cloud2bim会话模型为GLM-5.3')).toBe(true);
+  });
+
   it('非 Router 会话调用一律 forbidden', async () => {
     const stack = await buildStack();
     const tools = buildSupervisorTools(stack);

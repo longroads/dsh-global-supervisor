@@ -22,7 +22,11 @@ export interface SessionSnapshot {
 }
 
 export class DshSessionAdapter {
-  constructor(private readonly ctx: Context) {}
+  constructor(
+    private readonly ctx: Context,
+    /** projcache 目录注入（测试用；缺省 ~/.dsh/storages/session_projcache/sessions） */
+    private readonly projcacheDir?: string,
+  ) {}
 
   private persistence(): Promise<SessionPersistence> {
     return awaitService<SessionPersistence>(this.ctx, 'sessionPersistence');
@@ -72,6 +76,43 @@ export class DshSessionAdapter {
     } catch (error) {
       this.logTitleDiagnostic(sessionIds, new Map(), error);
       return new Map();
+    }
+  }
+
+  /**
+   * 读 DSH 会话标题缓存（session_projcache/sessions/<id>.json 的 record.rows.title.val，
+   * 即 DSH 侧边栏自动生成的会话摘要名）。单文件缺失/畸形静默跳过；目录不可达返回空 Map。
+   */
+  async readCachedTitles(sessionIds: readonly string[]): Promise<Map<string, string>> {
+    if (sessionIds.length === 0) return new Map();
+    const titles = new Map<string, string>();
+    const cacheDir = await this.resolveProjcacheDir();
+    const { readFile } = await import('node:fs/promises');
+    const path = await import('node:path');
+    await Promise.all(sessionIds.map(async (sessionId) => {
+      try {
+        const raw = await readFile(path.join(cacheDir, `${sessionId}.json`), 'utf8');
+        const parsed = JSON.parse(raw) as { record?: { rows?: { title?: { val?: unknown } } } };
+        const title = parsed.record?.rows?.title?.val;
+        if (typeof title === 'string' && title.trim() !== '') titles.set(sessionId, title.trim());
+      } catch {
+        // 单文件缺失/畸形跳过——标题缺席属正常（新会话可能尚未生成摘要）
+      }
+    }));
+    return titles;
+  }
+
+  /** projcache 目录解析：注入优先，其次 dsh-home-paths，降级 ~/.dsh。 */
+  private async resolveProjcacheDir(): Promise<string> {
+    if (this.projcacheDir !== undefined) return this.projcacheDir;
+    try {
+      const mod = await import('@deepseek-ai/dsh-home-paths');
+      const path = await import('node:path');
+      return path.join(mod.resolveDshHome(), 'storages', 'session_projcache', 'sessions');
+    } catch {
+      const os = await import('node:os');
+      const path = await import('node:path');
+      return path.join(os.homedir(), '.dsh', 'storages', 'session_projcache', 'sessions');
     }
   }
 

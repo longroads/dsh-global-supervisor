@@ -69,10 +69,11 @@ export function buildSupervisorTools(stack: SupervisorStack): ToolDefinition[] {
       const workspace = await stack.workspaceManager.listWorkspaceOverview(true).then((all) => all.find((item) => item.workspaceId === project.workspaceId));
       const sessionIds = workspace?.sessionIds ?? [];
       const titles = await stack.sessionAdapter.readTitles([...sessionIds]);
+      const cached = await stack.sessionAdapter.readCachedTitles([...sessionIds]);
       return {
         ok: true,
         project,
-        available_sessions: sessionIds.map((id) => ({ id, label: titles.get(id) ?? id.slice(0, 18) })),
+        available_sessions: sessionIds.map((id) => ({ id, label: titles.get(id) ?? cached.get(id) ?? id.slice(0, 18) })),
       };
     },
   }));
