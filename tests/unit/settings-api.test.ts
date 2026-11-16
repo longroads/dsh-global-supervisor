@@ -134,6 +134,41 @@ describe('设置面板 HTTP API', () => {
     expect(res2.statusCode).toBe(400);
   });
 
+  it('同源判定按 host 比较（scheme 不敏感）：https 面板访问 claim/webhook 放行，异 host 与畸形 Origin 拒绝', async () => {
+    const { ctx, routes } = fakeCtxWithWebServer();
+    const stack = await buildStack(ctx);
+    await registerSettingsApi(ctx, stack, { webhookSources: [], maxEventTextChars: 4000, redactPatterns: true });
+    const emit = (headers: Record<string, string>, body: unknown) => {
+      const chunks: Buffer[] = [Buffer.from(JSON.stringify(body))];
+      return {
+        method: 'POST',
+        headers,
+        on: (event: string, cb: (chunk?: Buffer) => void) => {
+          if (event === 'data') chunks.forEach((c) => cb(c));
+          if (event === 'end') cb();
+        },
+      };
+    };
+    // 事故回归：DSH Web 面经 https 提供时浏览器 Origin 是 https://<host>，必须放行
+    const claimHttps = emit({ origin: 'https://10.10.1.222:10443', host: '10.10.1.222:10443' }, { mode: 'session', sessionId: 's-https' });
+    const res1 = fakeRes();
+    await routes[2]?.handler?.(claimHttps, res1);
+    expect(res1.statusCode).toBe(200);
+    const hookHttps = emit({ origin: 'https://h:1', host: 'h:1' }, { source: 'github', type: 'x', event_id: 'https-1' });
+    const res2 = fakeRes();
+    await routes[3]?.handler?.(hookHttps, res2);
+    expect(res2.statusCode).toBe(202);
+    // 异 host（含 https 伪同源）仍拒绝
+    const claimEvil = emit({ origin: 'https://evil:10443', host: '10.10.1.222:10443' }, { mode: 'session', sessionId: 's-x' });
+    const res3 = fakeRes();
+    await routes[2]?.handler?.(claimEvil, res3);
+    expect(res3.statusCode).toBe(403);
+    const hookMalformed = emit({ origin: 'not a url', host: 'h:1' }, { source: 'github', type: 'x' });
+    const res4 = fakeRes();
+    await routes[3]?.handler?.(hookMalformed, res4);
+    expect(res4.statusCode).toBe(403);
+  });
+
   it('POST webhook：合法事件 202 入库携带 thread/channel 元数据；同 event_id 重复投递返回 duplicate', async () => {
     const { ctx, routes } = fakeCtxWithWebServer();
     const stack = await buildStack(ctx);

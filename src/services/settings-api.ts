@@ -42,6 +42,21 @@ function jsonResponse(data: unknown, status = 200): Response {
   });
 }
 
+/**
+ * 同源 CSRF 防线：Origin 为空（非浏览器/服务器对服务器调用）放行；
+ * 否则要求 Origin 的 host（含端口）与请求 Host 头一致——scheme 不参与比较。
+ * DSH Web 面可经 https 提供（如局域网访问 https://<ip>:<port>），硬编码 http:// 前缀
+ * 会把合法同源请求误判 403（0.5.2 实测事故：面板 claim 失败 error=origin）。
+ */
+function isSameOrigin(origin: string, host: string): boolean {
+  if (origin === '') return true;
+  try {
+    return new URL(origin).host === host;
+  } catch {
+    return false;
+  }
+}
+
 /** Webhook 事件路由选项（ITERATION_PLAN 1-D；来自插件 config.events）。 */
 export interface WebhookEventOptions {
   webhookSources: string[];
@@ -135,9 +150,7 @@ export async function registerSettingsApi(ctx: Context, stack: SupervisorStack, 
     path: '/global-supervisor/claim',
     handler: async (req: IncomingMessage, res: ServerResponse) => {
       res.setHeader('content-type', 'application/json; charset=utf-8');
-      const origin = req.headers.origin ?? '';
-      const host = req.headers.host ?? '';
-      if (origin !== '' && origin !== `http://${host}`) {
+      if (!isSameOrigin(req.headers.origin ?? '', req.headers.host ?? '')) {
         res.statusCode = 403;
         res.end(JSON.stringify({ ok: false, error: 'origin' }));
         return;
@@ -168,9 +181,7 @@ export async function registerSettingsApi(ctx: Context, stack: SupervisorStack, 
     path: '/global-supervisor/events',
     handler: async (req: IncomingMessage, res: ServerResponse) => {
       res.setHeader('content-type', 'application/json; charset=utf-8');
-      const origin = req.headers.origin ?? '';
-      const host = req.headers.host ?? '';
-      if (origin !== '' && origin !== `http://${host}`) {
+      if (!isSameOrigin(req.headers.origin ?? '', req.headers.host ?? '')) {
         res.statusCode = 403;
         res.end(JSON.stringify({ ok: false, error: 'origin' }));
         return;
