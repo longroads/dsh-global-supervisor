@@ -33,5 +33,5 @@ coverage/
 .omo/
 .opencode/
 
-# 用户参考资料（非工程文件，md 转换产物除外）
-tmp/superagent/*.docx
+# 工作资料目录（需求讨论/调研原始材料，非工程文件——不入库且历史清除）
+tmp/
