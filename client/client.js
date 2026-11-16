@@ -50,6 +50,7 @@ function SupervisorPanel() {
   const [sessionId, setSessionId] = (0, import_react.useState)("");
   const [busy, setBusy] = (0, import_react.useState)(false);
   const [result, setResult] = (0, import_react.useState)("");
+  const [checkingUpdate, setCheckingUpdate] = (0, import_react.useState)(false);
   const reload = (0, import_react.useCallback)(() => {
     setError("");
     fetch(api("global-supervisor/settings")).then((r) => r.json()).then((payload) => {
@@ -75,6 +76,12 @@ function SupervisorPanel() {
       setBusy(false);
     });
   }, [mode, sessionId, workspaceId, reload]);
+  const checkUpdate = (0, import_react.useCallback)(() => {
+    setCheckingUpdate(true);
+    fetch(api("global-supervisor/update-check"), { method: "POST" }).then((r) => r.json()).then((payload) => {
+      if (payload.state) setData((prev) => prev === null ? prev : { ...prev, update: payload.state });
+    }).catch((e) => setResult(`\u68C0\u67E5\u66F4\u65B0\u5931\u8D25\uFF1A${String(e)}`)).finally(() => setCheckingUpdate(false));
+  }, []);
   if (error !== "") return (0, import_react.createElement)("div", { style: style.card }, `\u52A0\u8F7D\u5931\u8D25\uFF1A${error}`);
   if (data === null) return (0, import_react.createElement)("div", { style: style.card }, "\u52A0\u8F7D\u4E2D\u2026");
   const selectedWorkspace = data.workspaces.find((w) => w.id === workspaceId);
@@ -87,6 +94,13 @@ function SupervisorPanel() {
       { style: style.row },
       (0, import_react.createElement)("span", { style: style.label }, "\u5F53\u524D Router"),
       (0, import_react.createElement)("strong", null, data.router ? `${data.router.source === "preset" ? "\uFF08\u9884\u7F6E\uFF09" : ""}${data.router.mode === "workspace" ? "\u5DE5\u4F5C\u533A\u6A21\u5F0F" : "\u4F1A\u8BDD\u6A21\u5F0F"} \xB7 ${data.router.sessionId.slice(0, 18)}\u2026${data.router.claimedAt ? `\uFF08${data.router.claimedAt.slice(0, 10)} \u8BBE\u7F6E\uFF09` : ""}` : "\u672A\u8BBE\u7F6E\uFF08\u65E0\u9884\u7F6E\u4E14\u672A\u6307\u6D3E\uFF09")
+    ),
+    (0, import_react.createElement)(
+      "div",
+      { style: style.row },
+      (0, import_react.createElement)("span", { style: style.label }, "\u7248\u672C"),
+      (0, import_react.createElement)("span", null, data.update.updateAvailable && data.update.latest ? `\u53D1\u73B0\u65B0\u7248\u672C v${data.update.latest}\uFF08\u5F53\u524D v${data.update.current}\uFF09\u3002\u5347\u7EA7\uFF1Adsh plugin --profile desktop update dsh-global-supervisor` : data.update.disabled ? `v${data.update.current}\uFF08\u66F4\u65B0\u68C0\u67E5\u5DF2\u7981\u7528\uFF09` : data.update.latest !== null ? `v${data.update.current}\uFF08\u5DF2\u662F\u6700\u65B0${data.update.source === "npmmirror" ? " \xB7 npmmirror" : ""}\uFF09` : data.update.error !== null ? `v${data.update.current}\uFF08\u68C0\u67E5\u5931\u8D25\uFF1A${data.update.error}\uFF09` : `v${data.update.current}`),
+      (0, import_react.createElement)("button", { style: style.button, disabled: checkingUpdate, onClick: checkUpdate }, checkingUpdate ? "\u68C0\u67E5\u4E2D\u2026" : "\u68C0\u67E5\u66F4\u65B0")
     ),
     (0, import_react.createElement)(
       "div",
