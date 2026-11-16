@@ -49,7 +49,7 @@ Full documentation ships inside the npm package (in Chinese) at `node_modules/ds
 
 ## Status
 
-Version 0.5.5 — the full planned feature set is complete: 25 tools (24 Router + `worker_report`), 200 unit tests, and every major flow verified end-to-end against a real DSH Desktop 0.2.2-rc.x host.
+Version 0.5.6 — the full planned feature set is complete: 25 tools (24 Router + `worker_report`), 204 unit tests, and every major flow verified end-to-end against a real DSH Desktop 0.2.2-rc.x host.
 
 ## License
 

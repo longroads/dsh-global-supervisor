@@ -48,7 +48,7 @@ dsh plugin --profile desktop update dsh-global-supervisor
 
 ## 状态
 
-当前版本 0.5.5：规划功能全部完成——跨 Workspace 任务管理、事件路由与合批、Thread 直通、上下文召回、看门狗四分类、IM 通知、steer 与模型切换、内置更新检查。25 个工具、200 个单测，主要流程均在真实 DSH Desktop 0.2.2-rc.x Host 实测通过（细节见包内 API_COMPATIBILITY 变更记录）。
+当前版本 0.5.6：规划功能全部完成——跨 Workspace 任务管理、事件路由与合批、Thread 直通、上下文召回、看门狗四分类、IM 通知、steer 与模型切换、内置更新检查。25 个工具、204 个单测，主要流程均在真实 DSH Desktop 0.2.2-rc.x Host 实测通过（细节见包内 API_COMPATIBILITY 变更记录）。
 
 ## License
 
