@@ -19,6 +19,7 @@ A single Router session manages many project workspaces: identify projects, disp
 - **Model control** — per-task / per-project model selection and switching; `steer` to inject instructions into a running task.
 - **Serial dispatch** — ModelQueue defaults to concurrency 1 with priority queue-jumping that never preempts a running task, tuned for local inference.
 - **Scheduled inspections** — reuses the DSH native host-wide Schedule service (0.2.2-rc.x); no custom cron.
+- **Built-in update check** — the settings panel probes the latest npm release (with npmmirror fallback) and shows an upgrade hint when a newer version exists.
 
 ## Requirements
 
@@ -34,19 +35,21 @@ dsh plugin --profile desktop add dsh-global-supervisor
 
 Restart DSH Desktop. **Installing is not enough**: open the settings panel ("Global Supervisor") and assign a Router session first. IM push is optional (configure a dsh-im bot). Patch-level configuration options: see `cordis.patch.yml`.
 
-For development, link mode works too: in the profile directory run `pnpm add "dsh-global-supervisor@link:<repo path>"` and add the package name to `dsh.profile.bundles`.
+## Upgrade
+
+Open the settings panel — it checks for new releases (npmjs, npmmirror fallback) and shows the upgrade command:
+
+```powershell
+dsh plugin --profile desktop update dsh-global-supervisor
+```
 
 ## Documentation
 
-Full documentation ships inside the npm package (in Chinese) at `node_modules/dsh-global-supervisor/docs/`: USER_GUIDE (usage), DEVELOPMENT_PLAN, API_COMPATIBILITY (API contract + host sandbox contract), ITERATION_PLAN, TEST_PLAN, DEPLOYMENT, TROUBLESHOOTING, INTEGRATIONS. Engineering discipline: [AGENTS.md](AGENTS.md).
-
-## Development
-
-Build and tests must run on the DSH runtime node (≥ 22.19; PATH node is often too old). All release gates (tsc, client bundle, vitest, bundle smoke) run via `node scripts/prepublish-check.mjs`, wired to `prepublishOnly` — `npm publish` enforces them automatically.
+Full documentation ships inside the npm package (in Chinese) at `node_modules/dsh-global-supervisor/docs/`: USER_GUIDE (usage), TROUBLESHOOTING (troubleshooting), DEPLOYMENT (deployment & operations), INTEGRATIONS (external integration examples), API_COMPATIBILITY (host compatibility contract).
 
 ## Status
 
-Version 0.5.3 — the full planned feature set is complete: 25 tools (24 Router + `worker_report`), 191 unit tests, and every major flow verified end-to-end against a real DSH Desktop 0.2.2-rc.x host.
+Version 0.5.4 — the full planned feature set is complete: 25 tools (24 Router + `worker_report`), 200 unit tests, and every major flow verified end-to-end against a real DSH Desktop 0.2.2-rc.x host.
 
 ## License
 

@@ -18,6 +18,7 @@ DSH（DeepSeek Harness）全局监督插件：跨 Workspace 的项目管理、�
 - **IM 推送（可选）**：经 dsh-im 把需人工提醒与完成摘要推到飞书/Telegram 等手机 IM，不可用自动降级 Router 会话。
 - **串行派发**：ModelQueue 默认并发 1，优先级插队不抢占运行中任务，适配本地推理资源。
 - **定时巡检**：复用 DSH 原生 Host-wide Schedule（0.2.2-rc.x），不自研 Cron。
+- **内置更新检查**：设置面板自动探测 npm 最新版（npmmirror 兜底），发现新版即提示升级命令。
 
 ## 环境要求
 
@@ -33,22 +34,21 @@ dsh plugin --profile desktop add dsh-global-supervisor
 
 安装后重启 DSH Desktop。**装完 ≠ 可用**：首次使用需在设置面板（全局监督）指派 Router 会话，IM 推送为可选项（配置 dsh-im bot 后生效）；patch 级配置项见包内 `cordis.patch.yml` 示例。
 
-开发期调试可用 link 模式：profile 目录 `pnpm add "dsh-global-supervisor@link:<仓库路径>"` 并把包名加入 profile 的 `dsh.profile.bundles`。
+## 升级
 
-## 开发
+打开设置面板，面板会自动检查新版本（npmjs 主源、npmmirror 兜底）并给出升级命令：
 
 ```powershell
-# 构建与测试须用 DSH runtime node（本机 PATH node 过旧）
-node24 node_modules\typescript\bin\tsc -p tsconfig.json   # host 侧构建（含类型检查）
-node24 scripts\build-client.mjs                        # client 侧构建（设置面板 bundle）
-node24 node_modules\vitest\vitest.mjs run              # 全部测试
+dsh plugin --profile desktop update dsh-global-supervisor
 ```
 
-完整文档随 npm 包发行（安装后位于 `node_modules/dsh-global-supervisor/docs/`）：USER_GUIDE（使用说明）、DEVELOPMENT_PLAN（开发方案）、API_COMPATIBILITY（API 使用契约与宿主沙箱契约）、ITERATION_PLAN（迭代方案）、TEST_PLAN（测试与验收映射）、DEPLOYMENT（部署运维）、TROUBLESHOOTING（排障）、INTEGRATIONS（外部集成样例）、ASSESSMENT_SWOT（生态定位评估）。工程纪律见 [AGENTS.md](AGENTS.md)。
+## 文档
+
+完整文档随 npm 包发行（安装后位于 `node_modules/dsh-global-supervisor/docs/`）：USER_GUIDE（使用说明）、TROUBLESHOOTING（排障）、DEPLOYMENT（部署运维）、INTEGRATIONS（外部集成样例）、API_COMPATIBILITY（宿主兼容契约）。
 
 ## 状态
 
-当前版本 0.5.3：规划功能全部完成——跨 Workspace 任务管理、事件路由与合批、Thread 直通、上下文召回、看门狗四分类、IM 通知、steer 与模型切换。25 个工具、191 个单测，主要流程均在真实 DSH Desktop 0.2.2-rc.x Host 实测通过（细节见包内 API_COMPATIBILITY 变更记录）。
+当前版本 0.5.4：规划功能全部完成——跨 Workspace 任务管理、事件路由与合批、Thread 直通、上下文召回、看门狗四分类、IM 通知、steer 与模型切换、内置更新检查。25 个工具、200 个单测，主要流程均在真实 DSH Desktop 0.2.2-rc.x Host 实测通过（细节见包内 API_COMPATIBILITY 变更记录）。
 
 ## License
 
