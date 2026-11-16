@@ -21,6 +21,7 @@
     "build:client": "node scripts/build-client.mjs",
     "test": "vitest run",
     "typecheck": "tsc -p tsconfig.json --noEmit",
+    "prepare": "node scripts/prepublish-check.mjs --build-only",
     "prepublishOnly": "node scripts/prepublish-check.mjs"
   },
   "keywords": [

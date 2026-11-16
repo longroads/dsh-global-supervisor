@@ -29,13 +29,20 @@ function resolveRuntimeNode() {
 const nodeBin = resolveRuntimeNode();
 console.log(`[prepublish] 使用 runtime node: ${nodeBin}`);
 
-// 门禁序列：类型检查+host 构建 → client 构建 → 全量测试 → client bundle 冒烟
+// --build-only：git 安装 prepare 场景只构建不跑测试（发布门禁保持全量）
+const buildOnly = process.argv.includes('--build-only');
+
+// 门禁序列：类型检查+host 构建 → client 构建 →（全量时）测试 → bundle 冒烟
 const gates = [
   { name: 'tsc 类型检查与 host 构建', args: ['node_modules/typescript/bin/tsc', '-p', 'tsconfig.json'] },
   { name: 'client bundle 构建', args: ['scripts/build-client.mjs'] },
-  { name: 'vitest 全量测试', args: ['node_modules/vitest/vitest.mjs', 'run'] },
-  { name: 'client bundle 冒烟', args: ['scripts/smoke-client.cjs'] },
 ];
+if (!buildOnly) {
+  gates.push(
+    { name: 'vitest 全量测试', args: ['node_modules/vitest/vitest.mjs', 'run'] },
+    { name: 'client bundle 冒烟', args: ['scripts/smoke-client.cjs'] },
+  );
+}
 
 for (const gate of gates) {
   console.log(`[prepublish] ▶ ${gate.name}`);
