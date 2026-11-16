@@ -1,6 +1,6 @@
 {
   "name": "dsh-global-supervisor",
-  "version": "0.5.6",
+  "version": "0.5.7",
   "description": "DSH global supervisor plugin: cross-workspace project management, task dispatch, status monitoring, scheduled inspections and event response. SQLite-backed state, structured worker reports, no DSH core modification.",
   "type": "module",
   "main": "dist/index.js",
