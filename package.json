@@ -1,6 +1,6 @@
 {
   "name": "dsh-global-supervisor",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "DSH 全局监督插件：跨 Workspace 的项目管理、任务分派、状态监控、定时巡检与事件响应。不修改 DSH 核心源码，业务状态 SQLite 持久化，Worker 结构化汇报。",
   "type": "module",
   "main": "dist/index.js",
@@ -20,7 +20,8 @@
     "build": "tsc -p tsconfig.json && node scripts/build-client.mjs",
     "build:client": "node scripts/build-client.mjs",
     "test": "vitest run",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "prepublishOnly": "node scripts/prepublish-check.mjs"
   },
   "keywords": [
     "deepseek-harness",
