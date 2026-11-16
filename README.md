@@ -43,13 +43,15 @@ Open the settings panel — it checks for new releases (npmjs, npmmirror fallbac
 dsh plugin --profile desktop update dsh-global-supervisor
 ```
 
+If the upgrade fails with `ERR_PNPM_MINIMUM_RELEASE_AGE_VIOLATION`, DSH's supply-chain policy is rejecting a version published more recently than the policy window (common right after a release). Grant an exact-version exemption (`dsh plugin allow-version dsh-global-supervisor@<version>`, covering the stale lockfile entry named in the error as well), or retry about a day after that version was published — see the packaged `docs/TROUBLESHOOTING.md` for details.
+
 ## Documentation
 
 Full documentation ships inside the npm package (in Chinese) at `node_modules/dsh-global-supervisor/docs/`: USER_GUIDE (usage), TROUBLESHOOTING (troubleshooting), DEPLOYMENT (deployment & operations), INTEGRATIONS (external integration examples), API_COMPATIBILITY (host compatibility contract).
 
 ## Status
 
-Version 0.5.6 — the full planned feature set is complete: 25 tools (24 Router + `worker_report`), 204 unit tests, and every major flow verified end-to-end against a real DSH Desktop 0.2.2-rc.x host.
+Version 0.5.7 — the full planned feature set is complete: 25 tools (24 Router + `worker_report`), 204 unit tests, and every major flow verified end-to-end against a real DSH Desktop 0.2.2-rc.x host.
 
 ## License
 

@@ -42,13 +42,15 @@ dsh plugin --profile desktop add dsh-global-supervisor
 dsh plugin --profile desktop update dsh-global-supervisor
 ```
 
+若升级报 `ERR_PNPM_MINIMUM_RELEASE_AGE_VIOLATION`：DSH 供应链策略拦截了发布过新的版本（发版后立即升级常见）。先做指定版本豁免（`dsh plugin allow-version dsh-global-supervisor@<版本>`，报错点名的 lockfile 旧条目也需一并豁免），或等该版本发布约一天后重试——详见包内 `docs/TROUBLESHOOTING.md`。
+
 ## 文档
 
 完整文档随 npm 包发行（安装后位于 `node_modules/dsh-global-supervisor/docs/`）：USER_GUIDE（使用说明）、TROUBLESHOOTING（排障）、DEPLOYMENT（部署运维）、INTEGRATIONS（外部集成样例）、API_COMPATIBILITY（宿主兼容契约）。
 
 ## 状态
 
-当前版本 0.5.6：规划功能全部完成——跨 Workspace 任务管理、事件路由与合批、Thread 直通、上下文召回、看门狗四分类、IM 通知、steer 与模型切换、内置更新检查。25 个工具、204 个单测，主要流程均在真实 DSH Desktop 0.2.2-rc.x Host 实测通过（细节见包内 API_COMPATIBILITY 变更记录）。
+当前版本 0.5.7：规划功能全部完成——跨 Workspace 任务管理、事件路由与合批、Thread 直通、上下文召回、看门狗四分类、IM 通知、steer 与模型切换、内置更新检查。25 个工具、204 个单测，主要流程均在真实 DSH Desktop 0.2.2-rc.x Host 实测通过（细节见包内 API_COMPATIBILITY 变更记录）。
 
 ## License
 
