@@ -48,7 +48,7 @@ node24 node_modules\vitest\vitest.mjs run              # 全部测试
 
 ## 状态
 
-当前版本 0.5.2：规划功能全部完成——跨 Workspace 任务管理、事件路由与合批、Thread 直通、上下文召回、看门狗四分类、IM 通知、steer 与模型切换。25 个工具、190 个单测，主要流程均在真实 DSH Desktop 0.2.2-rc.x Host 实测通过（细节见包内 API_COMPATIBILITY 变更记录）。
+当前版本 0.5.3：规划功能全部完成——跨 Workspace 任务管理、事件路由与合批、Thread 直通、上下文召回、看门狗四分类、IM 通知、steer 与模型切换。25 个工具、191 个单测，主要流程均在真实 DSH Desktop 0.2.2-rc.x Host 实测通过（细节见包内 API_COMPATIBILITY 变更记录）。
 
 ## License
 

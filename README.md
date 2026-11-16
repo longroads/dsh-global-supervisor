@@ -46,7 +46,7 @@ Build and tests must run on the DSH runtime node (≥ 22.19; PATH node is often 
 
 ## Status
 
-Version 0.5.2 — the full planned feature set is complete: 25 tools (24 Router + `worker_report`), 190 unit tests, and every major flow verified end-to-end against a real DSH Desktop 0.2.2-rc.x host.
+Version 0.5.3 — the full planned feature set is complete: 25 tools (24 Router + `worker_report`), 191 unit tests, and every major flow verified end-to-end against a real DSH Desktop 0.2.2-rc.x host.
 
 ## License
 
