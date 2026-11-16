@@ -41,6 +41,7 @@ if (!buildOnly) {
   gates.push(
     { name: 'vitest 全量测试', args: ['node_modules/vitest/vitest.mjs', 'run'] },
     { name: 'client bundle 冒烟', args: ['scripts/smoke-client.cjs'] },
+    { name: 'client 渲染级 QA（混合版本判空回归）', args: ['scripts/render-qa.cjs'] },
   );
 }
 
