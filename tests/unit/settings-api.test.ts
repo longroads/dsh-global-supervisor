@@ -11,6 +11,8 @@ import { RouterIdentity } from '../../src/services/router-identity.js';
 import { TaskManager } from '../../src/services/task-manager.js';
 import { EventManager } from '../../src/services/event-manager.js';
 import { redact, registerSettingsApi } from '../../src/services/settings-api.js';
+import { UpdateChecker } from '../../src/services/update-checker.js';
+import { PLUGIN_VERSION } from '../../src/version.js';
 import type { SupervisorStack } from '../../src/runtime.js';
 
 interface CapturedRoute {
@@ -61,11 +63,11 @@ function fakeRes() {
 }
 
 describe('设置面板 HTTP API', () => {
-  it('注册四条路由：settings（resource）、client-ping、claim 与 events（handler）', async () => {
+  it('注册五条路由：settings（resource）、client-ping、claim、events（prefix）、update-check', async () => {
     const { ctx, routes } = fakeCtxWithWebServer();
     const stack = await buildStack(ctx);
     await registerSettingsApi(ctx, stack);
-    expect(routes.map((r) => r.path)).toEqual(['/global-supervisor/settings', '/global-supervisor/client-ping', '/global-supervisor/claim', '/global-supervisor/events']);
+    expect(routes.map((r) => r.path)).toEqual(['/global-supervisor/settings', '/global-supervisor/client-ping', '/global-supervisor/claim', '/global-supervisor/events', '/global-supervisor/update-check']);
     expect(typeof routes[0]?.resource).toBe('function');
     expect(typeof routes[2]?.handler).toBe('function');
     expect(routes[3]?.kind).toBe('prefix');
@@ -97,6 +99,42 @@ describe('设置面板 HTTP API', () => {
     } finally {
       rmSync(projcacheDir, { recursive: true, force: true });
     }
+  });
+
+  it('GET settings update 字段缺省：夹具栈无 updateChecker → disabled=true 且 current=PLUGIN_VERSION', async () => {
+    const { ctx, routes } = fakeCtxWithWebServer();
+    const stack = await buildStack(ctx);
+    await registerSettingsApi(ctx, stack);
+    const response = await routes[0]?.resource?.(new Request('http://x/global-supervisor/settings'));
+    const payload = (await response?.json()) as { update: { disabled: boolean; current: string } };
+    expect(payload.update.disabled).toBe(true);
+    expect(payload.update.current).toBe(PLUGIN_VERSION);
+  });
+
+  it('POST update-check：强制刷新返回状态（fake registry）；跨源 403', async () => {
+    const { ctx, routes } = fakeCtxWithWebServer();
+    const stack = await buildStack(ctx);
+    let calls = 0;
+    stack.updateChecker = new UpdateChecker({
+      fetchImpl: (() => {
+        calls += 1;
+        return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ version: '99.9.9' }) });
+      }) as unknown as typeof fetch,
+    });
+    await registerSettingsApi(ctx, stack);
+    const req = { method: 'POST', headers: { origin: 'http://h:1', host: 'h:1' }, on: (_e: string, cb: (c?: Buffer) => void) => cb() };
+    const res = fakeRes();
+    await routes[4]?.handler?.(req, res);
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res.body) as { ok: boolean; state: { latest: string | null; updateAvailable: boolean; source: string | null } };
+    expect(body.ok).toBe(true);
+    expect(body.state.latest).toBe('99.9.9');
+    expect(body.state.updateAvailable).toBe(true);
+    expect(body.state.source).toBe('npm');
+    expect(calls).toBeGreaterThanOrEqual(1);
+    const resBad = fakeRes();
+    await routes[4]?.handler?.({ method: 'POST', headers: { origin: 'http://evil', host: 'h:1' }, on: (_e: string, cb: (c?: Buffer) => void) => cb() }, resBad);
+    expect(resBad.statusCode).toBe(403);
   });
 
   it('POST claim：合法体指派成功并写入身份', async () => {

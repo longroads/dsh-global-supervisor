@@ -8,6 +8,8 @@ import type { Context } from '@deepseek-ai/cordis';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { awaitService } from '../adapters/host-services.js';
 import type { SupervisorStack } from '../runtime.js';
+import type { UpdateInfo } from './update-checker.js';
+import { PLUGIN_VERSION } from '../version.js';
 
 /** 最小 WebServer 服务面（沙箱 ctx.get 解析，类型收窄）。 */
 interface WebServerLike {
@@ -25,6 +27,8 @@ export interface SettingsApiResponse {
   /** 当前生效身份（认领记录优先，其次 patch 预置；source 区分来源，preset 无 claimedAt 时间戳） */
   router: { mode: string; sessionId: string; workspaceId?: string; claimedAt: string; source: 'claimed' | 'preset' } | null;
   workspaces: Array<{ id: string; title: string; path: string; sessions: SessionOption[] }>;
+  /** 更新检查状态（config.updateCheck=false 时 disabled=true 且无网络外呼） */
+  update: UpdateInfo;
 }
 
 /** 从快照派生会话显示名（用户不认识原始 ID；标题需读事件流故第一版不取）。 */
@@ -88,6 +92,7 @@ export async function registerSettingsApi(ctx: Context, stack: SupervisorStack, 
     kind: 'exact',
     path: '/global-supervisor/settings',
     resource: async () => {
+      void stack.updateChecker?.refreshIfStale();
       const overview = await stack.workspaceManager.listWorkspaceOverview(true);
       const snapshots = await stack.sessionAdapter.listSnapshots();
       const labels = new Map(snapshots.map((s) => [s.sessionId, s]));
@@ -104,6 +109,7 @@ export async function registerSettingsApi(ctx: Context, stack: SupervisorStack, 
           : null;
       const payload: SettingsApiResponse = {
         router,
+        update: stack.updateChecker?.getState() ?? { current: PLUGIN_VERSION, latest: null, updateAvailable: false, checkedAt: null, source: null, error: null, disabled: true },
         workspaces: overview.map((item) => ({
           id: item.workspaceId,
           title: item.title,
@@ -229,6 +235,34 @@ export async function registerSettingsApi(ctx: Context, stack: SupervisorStack, 
       });
       res.statusCode = 202;
       res.end(JSON.stringify({ ok: true, inserted: result.inserted, duplicate: !result.inserted }));
+    },
+  });
+
+  // 更新检查端点（面板"检查更新"按钮）：强制刷新并返回最新状态
+  webServer.register({
+    kind: 'exact',
+    path: '/global-supervisor/update-check',
+    handler: async (req: IncomingMessage, res: ServerResponse) => {
+      res.setHeader('content-type', 'application/json; charset=utf-8');
+      if (!isSameOrigin(req.headers.origin ?? '', req.headers.host ?? '')) {
+        res.statusCode = 403;
+        res.end(JSON.stringify({ ok: false, error: 'origin' }));
+        return;
+      }
+      if (req.method !== 'POST') {
+        res.statusCode = 405;
+        res.end(JSON.stringify({ ok: false, error: 'method-not-allowed' }));
+        return;
+      }
+      const checker = stack.updateChecker;
+      if (!checker) {
+        res.statusCode = 200;
+        res.end(JSON.stringify({ ok: true, disabled: true }));
+        return;
+      }
+      const state = await checker.refresh(true);
+      res.statusCode = 200;
+      res.end(JSON.stringify({ ok: true, state }));
     },
   });
 }

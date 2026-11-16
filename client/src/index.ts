@@ -21,6 +21,7 @@ interface ClientContext {
 interface SettingsPayload {
   router: { mode: string; sessionId: string; workspaceId?: string; claimedAt: string; source: 'claimed' | 'preset' } | null;
   workspaces: Array<{ id: string; title: string; path: string; sessions: Array<{ id: string; label: string }> }>;
+  update: { current: string; latest: string | null; updateAvailable: boolean; checkedAt: string | null; source: string | null; error: string | null; disabled: boolean };
 }
 
 function api(path: string): string {
@@ -47,6 +48,7 @@ function SupervisorPanel(): unknown {
   const [sessionId, setSessionId] = useState('');
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState('');
+  const [checkingUpdate, setCheckingUpdate] = useState(false);
 
   const reload = useCallback(() => {
     setError('');
@@ -79,6 +81,17 @@ function SupervisorPanel(): unknown {
       .finally(() => { setBusy(false); });
   }, [mode, sessionId, workspaceId, reload]);
 
+  const checkUpdate = useCallback(() => {
+    setCheckingUpdate(true);
+    fetch(api('global-supervisor/update-check'), { method: 'POST' })
+      .then((r) => r.json() as Promise<{ ok: boolean; state?: SettingsPayload['update']; disabled?: boolean }>)
+      .then((payload) => {
+        if (payload.state) setData((prev) => (prev === null ? prev : { ...prev, update: payload.state as SettingsPayload['update'] }));
+      })
+      .catch((e: unknown) => setResult(`检查更新失败：${String(e)}`))
+      .finally(() => setCheckingUpdate(false));
+  }, []);
+
   if (error !== '') return h('div', { style: style.card }, `加载失败：${error}`);
   if (data === null) return h('div', { style: style.card }, '加载中…');
 
@@ -94,6 +107,18 @@ function SupervisorPanel(): unknown {
       h('strong', null, data.router
         ? `${data.router.source === 'preset' ? '（预置）' : ''}${data.router.mode === 'workspace' ? '工作区模式' : '会话模式'} · ${data.router.sessionId.slice(0, 18)}…${data.router.claimedAt ? `（${data.router.claimedAt.slice(0, 10)} 设置）` : ''}`
         : '未设置（无预置且未指派）')),
+    h('div', { style: style.row },
+      h('span', { style: style.label }, '版本'),
+      h('span', null, data.update.updateAvailable && data.update.latest
+        ? `发现新版本 v${data.update.latest}（当前 v${data.update.current}）。升级：dsh plugin --profile desktop update dsh-global-supervisor`
+        : data.update.disabled
+          ? `v${data.update.current}（更新检查已禁用）`
+          : data.update.latest !== null
+            ? `v${data.update.current}（已是最新${data.update.source === 'npmmirror' ? ' · npmmirror' : ''}）`
+            : data.update.error !== null
+              ? `v${data.update.current}（检查失败：${data.update.error}）`
+              : `v${data.update.current}`),
+      h('button', { style: style.button, disabled: checkingUpdate, onClick: checkUpdate }, checkingUpdate ? '检查中…' : '检查更新')),
     h('div', { style: style.row },
       h('span', { style: style.label }, '模式'),
       h('label', null, h('input', { type: 'radio', checked: mode === 'session', onChange: () => setMode('session') }), ' 仅指定会话'),

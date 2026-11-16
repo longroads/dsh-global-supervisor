@@ -44,6 +44,7 @@ interface PluginConfig {
   dataDir: string;
   routerWorkspaceId: string;
   routerSessionId: string;
+  updateCheck: boolean;
   events: EventsConfig;
   notifier: NotifierOptions;
 }
@@ -54,6 +55,7 @@ export const Config = z.object({
   dataDir: z.string().default('').description('插件数据目录（默认经 dsh-home-paths 解析为 ~/.dsh/global-supervisor）'),
   routerWorkspaceId: z.string().default('').description('Router 所属 DSH workspace ID（super-space01）'),
   routerSessionId: z.string().default('').description('Router 固定会话 ID（supervisor_* 工具的唯一授权调用方；留空则不启用业务工具）'),
+  updateCheck: z.boolean().default(true).description('更新检查：设置面板经 npm registry（npmmirror 兜底）探测最新版并提示升级；false 关闭一切外呼'),
   events: z.object({
     webhookSources: z.array(z.string()).default([]).description('允许的 Webhook 事件来源标识白名单；空数组表示不限制'),
     maxEventTextChars: z.number().default(4000).description('Webhook 事件正文截断上限（字符）'),
@@ -155,7 +157,7 @@ export function apply(ctx: Context, config: PluginConfig): void {
         const { awaitService } = await import('./adapters/host-services.js');
         const tools = await awaitService<{ register: (tool: ToolDefinition) => unknown }>(ctx, 'tools');
         const { createStack } = await import('./runtime.js');
-        const stack = await createStack(ctx, { dataDir: config.dataDir, routerSessionId: config.routerSessionId, notifier: config.notifier });
+        const stack = await createStack(ctx, { dataDir: config.dataDir, routerSessionId: config.routerSessionId, notifier: config.notifier, updateCheck: config.updateCheck });
         // Host 重启存疑恢复（需求说明第八节）：超时窗口已过判 failed/timeout，未过保持 running 待 Worker 汇报
         const recovery = stack.taskManager.recoverFromRestart();
         if (recovery.expiredIds.length > 0 || recovery.pendingIds.length > 0) {
