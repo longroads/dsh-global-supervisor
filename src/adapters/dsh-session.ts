@@ -71,7 +71,7 @@ export class DshSessionAdapter {
         }
       })();
       void this.titleCapability.then((capability) => {
-        this.logTitleDiagnostic([], new Map(), capability.available ? undefined : new Error(`title 能力缺失：${capability.reason}`));
+        if (!capability.available) this.logTitleDiagnostic([], new Map(), new Error(`title 能力缺失：${capability.reason}`));
       });
     }
     return this.titleCapability;

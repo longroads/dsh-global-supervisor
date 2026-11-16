@@ -260,7 +260,7 @@ export async function registerSettingsApi(ctx: Context, stack: SupervisorStack, 
         res.end(JSON.stringify({ ok: true, disabled: true }));
         return;
       }
-      const state = await checker.refresh(true);
+      const state = await checker.refresh();
       res.statusCode = 200;
       res.end(JSON.stringify({ ok: true, state }));
     },

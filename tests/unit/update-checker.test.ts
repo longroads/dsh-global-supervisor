@@ -87,7 +87,7 @@ describe('UpdateChecker', () => {
       setTimeout(() => resolve({ ok: true, status: 200, json: () => Promise.resolve({ version: '1.0.0' }) }), 20);
     })]);
     const checker = new UpdateChecker({ fetchImpl: impl });
-    const [a, b] = await Promise.all([checker.refresh(true), checker.refresh(true)]);
+    const [a, b] = await Promise.all([checker.refresh(), checker.refresh()]);
     expect(urls).toHaveLength(1);
     expect(a.latest).toBe('1.0.0');
     expect(b).toEqual(a);

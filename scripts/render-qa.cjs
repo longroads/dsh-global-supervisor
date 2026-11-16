@@ -35,12 +35,6 @@ function collectText(node, out) {
   }
 }
 
-function renderOnce(Comp) {
-  hookIdx = 0;
-  pending = [];
-  return Comp();
-}
-
 async function drive(Comp, rounds = 12) {
   hookStates = [];
   let tree = null;

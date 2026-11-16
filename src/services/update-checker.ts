@@ -72,11 +72,10 @@ export class UpdateChecker {
     void this.refresh().catch(() => undefined);
   }
 
-  /** 刷新最新版探测；并发去重；主源失败自动走镜像源。 */
-  async refresh(force = false): Promise<UpdateInfo> {
+  /** 刷新最新版探测（总是真网络请求，TTL 逻辑只在 refreshIfStale）；并发去重；主源失败自动走镜像源。 */
+  async refresh(): Promise<UpdateInfo> {
     if (this.state.disabled) return this.getState();
     if (this.inflight !== null) return this.inflight;
-    void force;
     const pkg = this.opts.packageName ?? 'dsh-global-supervisor';
     const registries = this.opts.registries ?? DEFAULT_REGISTRIES;
     const fetchImpl = this.opts.fetchImpl ?? globalThis.fetch;
