@@ -22,6 +22,7 @@ import { SchedulerService } from './services/scheduler.js';
 import { NotifierService, SessionDirectNotifier } from './services/notifier.js';
 import type { NotifierConfig } from './services/notifier.js';
 import { TaskManager } from './services/task-manager.js';
+import { UpdateChecker } from './services/update-checker.js';
 import { WorkspaceManager } from './services/workspace-manager.js';
 
 /** 完整服务栈（工具层的唯一依赖面）。 */
@@ -40,13 +41,14 @@ export interface SupervisorStack {
   routerIdentity: RouterIdentity;
   routingRules: RoutingRuleRepository;
   llmCatalog: DshLlmCatalogAdapter;
+  updateChecker: UpdateChecker;
 }
 
 /** 数据库文件名（位于插件数据目录下）。 */
 const DB_FILENAME = 'supervisor.db';
 
 /** 组装服务栈（打开数据库并完成迁移）。 */
-export async function createStack(ctx: Context, options: { dataDir?: string; routerSessionId?: string; notifier?: NotifierConfig }): Promise<SupervisorStack> {
+export async function createStack(ctx: Context, options: { dataDir?: string; routerSessionId?: string; notifier?: NotifierConfig; updateCheck?: boolean }): Promise<SupervisorStack> {
   const dataDir = await resolveDataDir(options.dataDir);
   const { openDatabase } = await import('./database/connection.js');
   const { join } = await import('node:path');
@@ -103,6 +105,7 @@ export async function createStack(ctx: Context, options: { dataDir?: string; rou
     routerIdentity,
     routingRules: new RoutingRuleRepository(db),
     llmCatalog: new DshLlmCatalogAdapter(ctx),
+    updateChecker: new UpdateChecker({ enabled: options.updateCheck !== false }),
   };
 }
 
