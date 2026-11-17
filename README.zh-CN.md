@@ -51,7 +51,7 @@ dsh plugin --profile desktop update dsh-global-supervisor
 
 ## 状态
 
-当前版本 0.6.0：生产反馈加固版（2026-11-17 反馈报告 8 项全部落地）——迟到终态汇报收编（消除"已交付却卡重试"）、重派前检查未应用汇报、闭环通知硬接线（拒收/终态/判死重试/预算耗尽必达 Router，独立于事件路由模式）、启动窗口默认 10 分钟 + Worker 活跃宽限 + `supervisor_watchdog_config` 运行时调参、周期扫描与 restart-recovery 解耦（不再堆事件）、Router 执行守卫（越权告警 + 派发引导 + 纠正即学习）、纳管首项目巡检引导。26 个工具（25 Router + worker_report）、234 个单测。
+当前版本 0.6.1：生产反馈加固版（2026-11-17 反馈报告 8 项全部落地）——迟到终态汇报收编（消除"已交付却卡重试"）、重派前检查未应用汇报、闭环通知硬接线（拒收/终态/判死重试/预算耗尽必达 Router，独立于事件路由模式）、启动窗口默认 10 分钟 + Worker 活跃宽限 + `supervisor_watchdog_config` 运行时调参（扫描间隔默认 5 分钟，同样可调）、周期扫描与 restart-recovery 解耦（不再堆事件）、Router 执行守卫（越权告警 + 派发引导 + 纠正即学习）、纳管首项目巡检引导。26 个工具（25 Router + worker_report）、236 个单测。注意：0.6.0 为缺陷发布（package.json 带 UTF-8 BOM，DSH 安装器 JSON 校验失败），已被 0.6.1 取代——请直接更新到 0.6.1。
 
 ## License
 
