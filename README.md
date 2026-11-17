@@ -8,13 +8,14 @@ A single Router session manages many project workspaces: identify projects, disp
 
 ## Highlights
 
-- **Router/Worker split** — the Router session holds 24 `supervisor_*` tools; worker sessions report via `worker_report` with server-side permission checks (not prompt constraints).
+- **Router/Worker split** — the Router session holds 25 `supervisor_*` tools; worker sessions report via `worker_report` with server-side permission checks (not prompt constraints).
 - **Task state machine** — `pending → queued → running → completed` plus `blocked / need_human / failed / canceled`; strict transition table with audit trail; Task/TaskRun separation keeps retry history intact.
 - **SQLite persistence** — 13 tables on built-in `node:sqlite`, zero native dependencies.
 - **Event-driven** — webhook intake + 5 cordis event subscriptions with a unified dedup pipeline; observe/auto rule routing; multiple events batched into one Router notification.
 - **Thread passthrough** — tasks created from an event auto-subscribe to its thread; follow-up events on the same thread go straight to the assigned worker, bypassing the Router.
 - **Context recall** — `supervisor_recall` pulls related context (thread events, subscriptions, worker reports, run history) in one hop.
-- **Watchdog, 4 classes** — startup-timeout retry, run-timeout retry, need-human escalation, idle/lost worker detection; 5-minute scans.
+- **Watchdog, 4 classes** — startup-timeout retry (10-min window with live-agent grace, tunable at runtime via `supervisor_watchdog_config`), run-timeout retry, need-human escalation, idle/lost worker detection; scans every 30 minutes by default (also tunable). Judgements and retries always notify the Router.
+- **Router execution guard** — flags Router-session tool calls that target other managed workspaces, injects "dispatch instead of self-execute" hints on routing-preference hits, and suggests saving a routing rule when the user corrects the Router.
 - **IM push (optional)** — need-human alerts and completion summaries to Feishu/Telegram etc. via dsh-im, with automatic fallback to the Router session.
 - **Model control** — per-task / per-project model selection and switching; `steer` to inject instructions into a running task.
 - **Serial dispatch** — ModelQueue defaults to concurrency 1 with priority queue-jumping that never preempts a running task, tuned for local inference.
@@ -51,7 +52,7 @@ Full documentation ships inside the npm package (in Chinese) at `node_modules/ds
 
 ## Status
 
-Version 0.5.7 — the full planned feature set is complete: 25 tools (24 Router + `worker_report`), 204 unit tests, and every major flow verified end-to-end against a real DSH Desktop 0.2.2-rc.x host.
+Version 0.6.0 — production-feedback hardening release (feedback report 2026-11-17, all 8 items): late terminal reports are now adopted instead of silently rejected (no more "delivered but stuck in retry"), dispatch checks for unapplied reports before re-running, watchdog notifications are hard-wired (reject/terminal/retry/retry-exhausted always reach the Router, independent of event-routing mode), the startup window defaults to 10 min with live-agent grace and runtime tuning via `supervisor_watchdog_config`, periodic scanning no longer spams `task.restart-recovery` events, a Router execution guard flags cross-workspace tool calls and injects dispatch hints (plus correction-as-learning prompts), and adopting the first workspace now suggests a patrol schedule. 26 tools (25 Router + `worker_report`), 234 unit tests.
 
 ## License
 
