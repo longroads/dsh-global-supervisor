@@ -51,4 +51,11 @@ export class AuditRepository {
       .prepare('SELECT * FROM audit_logs WHERE target_type = ? AND target_id = ? ORDER BY id')
       .all(targetType, targetId) as unknown as AuditRow[];
   }
+
+  /** 按 action 查询（升序；用于"是否发生过某类操作"的存在性判定）。 */
+  byAction(action: string): AuditRow[] {
+    return this.db
+      .prepare('SELECT * FROM audit_logs WHERE action = ? ORDER BY id')
+      .all(action) as unknown as AuditRow[];
+  }
 }

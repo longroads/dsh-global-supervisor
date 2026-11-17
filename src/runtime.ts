@@ -11,6 +11,7 @@ import { DshSessionAdapter } from './adapters/dsh-session.js';
 import { DshWorkspaceAdapter } from './adapters/dsh-workspace.js';
 import type { DatabaseSync } from 'node:sqlite';
 import { AuditRepository } from './database/repository/audit-repository.js';
+import { PluginSettingRepository } from './database/repository/plugin-setting-repository.js';
 import { EventManager } from './services/event-manager.js';
 import { EventBatcher } from './services/event-batcher.js';
 import { EventRouter } from './services/event-router.js';
@@ -85,9 +86,12 @@ export async function createStack(ctx: Context, options: { dataDir?: string; rou
     });
   });
   const eventRouter = new EventRouter(db, agentAdapter, () => routerIdentity.ownerSessionId(), eventBatcher);
+  // 闭环种子规则（FB-4）：启动时确定性写入（幂等；observe 模式下仅留痕）
+  await eventRouter.ensureCoreRules();
   const monitor = new ProjectMonitor(taskManager, agentController, undefined, {
     agents: agentAdapter,
     notify: (message, severity) => notifier.notify(message, severity),
+    settings: new PluginSettingRepository(db),
   });
 
   return {

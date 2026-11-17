@@ -48,12 +48,43 @@ export function buildWorkerReportTool(stack: SupervisorStack): ToolDefinition {
         throw error;
       }
       const outcome = stack.agentController.applyWorkerReport(report, ctx.callerSessionId);
+      // 闭环通知硬接线（FB-4）：拒收/终态必达 Router，独立于事件路由 observe/auto 开关
+      if (!outcome.accepted) {
+        void stack.notifier.notify(
+          `Worker 汇报被拒（reason=${outcome.reason}）：任务 ${report.taskId} 当前状态 ${outcome.taskStatus ?? 'unknown'}，请人工核查`,
+          'critical',
+        );
+        void stack.eventManager.ingest({
+          eventId: `worker-report-rejected:${report.taskId}:${Date.now()}`,
+          source: 'internal',
+          type: 'worker_report.rejected',
+          taskId: report.taskId,
+          payloadJson: JSON.stringify({ reason: outcome.reason, taskStatus: outcome.taskStatus, workerSession: ctx.callerSessionId }),
+        });
+      }
       // 需人介入时唤醒 Router 会话转述（通知尽力而为，不阻断汇报结果）
       if (outcome.accepted && report.needHuman) {
         void stack.notifier.notify(
           `任务 ${report.taskId} 需要人工决策：${report.summary ?? ''}${report.blockers.length > 0 ? `（阻碍：${report.blockers.join('；')}）` : ''}`,
           'warning',
         );
+      }
+      // 终态送达 Router（completed=info / failed=warning；adopted 收编同样通知）
+      if (outcome.accepted && (outcome.reason === 'applied' || outcome.reason === 'adopted')) {
+        const terminal = outcome.taskStatus === 'completed' ? 'completed' : outcome.taskStatus === 'failed' ? 'failed' : '';
+        if (terminal !== '') {
+          void stack.notifier.notify(
+            `任务 ${report.taskId} ${terminal === 'completed' ? '已完成' : '失败'}（${outcome.reason}）：${report.summary ?? ''}`,
+            terminal === 'completed' ? 'info' : 'warning',
+          );
+        }
+        void stack.eventManager.ingest({
+          eventId: `task-terminal:${report.taskId}:${outcome.taskStatus}:${Date.now()}`,
+          source: 'internal',
+          type: 'task.terminal',
+          taskId: report.taskId,
+          payloadJson: JSON.stringify({ status: outcome.taskStatus, via: outcome.reason, workerSession: ctx.callerSessionId }),
+        });
       }
       // 来源事件带信道（channel_ref）的任务，完成时经该信道回复摘要（Phase 4 4-C）
       if (outcome.accepted && outcome.taskStatus === 'completed') {

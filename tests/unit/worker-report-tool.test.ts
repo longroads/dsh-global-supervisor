@@ -82,7 +82,7 @@ describe('worker_report 通知（Phase 4）', () => {
     expect(notices[0]?.message).toContain(task.id);
   });
 
-  it('完成且任务带 channel_ref：经该信道回复完成摘要', async () => {
+  it('完成且任务带 channel_ref：闭环通知 + 信道摘要各一条（两条目的不同）', async () => {
     const { stack, notices } = await buildStack();
     stack.eventManager.ingest({ eventId: 'wh-1', source: 'im', type: 'issue.opened', channelRef: 'im:feishu:chat-1' });
     const tool = buildWorkerReportTool(stack);
@@ -94,12 +94,11 @@ describe('worker_report 通知（Phase 4）', () => {
       { workspace_id: 'ws-1', task_id: task.id, status: 'completed', progress: 100, summary: '已完成' },
       execOf(WORKER_SESSION),
     );
-    expect(notices).toHaveLength(1);
-    expect(notices[0]?.message).toContain('【通知】');
-    expect(notices[0]?.message).toContain(task.id);
+    expect(notices).toHaveLength(2);
+    expect(notices.every((n) => n.message.includes('【通知】') && n.message.includes(task.id))).toBe(true);
   });
 
-  it('完成但任务无 channel_ref：不发完成通知', async () => {
+  it('完成（无 channel_ref）：闭环通知 info（FB-4——Worker 交付必达 Router）', async () => {
     const { stack, notices } = await buildStack();
     const tool = buildWorkerReportTool(stack);
     const task = stack.taskManager.createTask({ projectId: 'proj-1', title: 'T' }, { sessionId: ROUTER_SESSION, role: 'router' });
@@ -109,6 +108,67 @@ describe('worker_report 通知（Phase 4）', () => {
       { workspace_id: 'ws-1', task_id: task.id, status: 'completed', progress: 100, summary: '已完成' },
       execOf(WORKER_SESSION),
     );
-    expect(notices).toHaveLength(0);
+    expect(notices).toHaveLength(1);
+    expect(notices[0]?.message).toContain('【通知】');
+    expect(notices[0]?.message).toContain(task.id);
+  });
+
+  it('失败终态：闭环通知 warning + task.terminal 事件入库', async () => {
+    const { stack, notices } = await buildStack();
+    const tool = buildWorkerReportTool(stack);
+    const task = stack.taskManager.createTask({ projectId: 'proj-1', title: 'T' }, { sessionId: ROUTER_SESSION, role: 'router' });
+    stack.taskManager.enqueue(task.id, { sessionId: ROUTER_SESSION, role: 'router' });
+    stack.taskManager.markDispatched(task.id, WORKER_SESSION, null);
+    await tool.execute(
+      { workspace_id: 'ws-1', task_id: task.id, status: 'failed', blockers: ['依赖崩溃'] },
+      execOf(WORKER_SESSION),
+    );
+    expect(notices).toHaveLength(1);
+    expect(notices[0]?.message).toContain('【警告】');
+    expect(notices[0]?.message).toContain(task.id);
+    expect(countEvents(stack, 'task.terminal')).toBe(1);
+  });
+
+  it('拒收（invalid-transition）：critical 通知 + worker_report.rejected 事件（拒收不再是黑洞）', async () => {
+    const { stack, notices } = await buildStack();
+    const tool = buildWorkerReportTool(stack);
+    const task = stack.taskManager.createTask({ projectId: 'proj-1', title: 'T' }, { sessionId: ROUTER_SESSION, role: 'router' });
+    stack.taskManager.enqueue(task.id, { sessionId: ROUTER_SESSION, role: 'router' });
+    stack.taskManager.markDispatched(task.id, WORKER_SESSION, null);
+    stack.taskManager.cancel(task.id, { sessionId: ROUTER_SESSION, role: 'router' });
+    await tool.execute(
+      { workspace_id: 'ws-1', task_id: task.id, status: 'completed' },
+      execOf(WORKER_SESSION),
+    );
+    expect(notices).toHaveLength(1);
+    expect(notices[0]?.message).toContain('【严重】');
+    expect(notices[0]?.message).toContain('invalid-transition');
+    expect(countEvents(stack, 'worker_report.rejected')).toBe(1);
+  });
+
+  it('收编（adopted）：迟到终态汇报同样通知 Router', async () => {
+    const { stack, notices } = await buildStack();
+    const tool = buildWorkerReportTool(stack);
+    const task = stack.taskManager.createTask({ projectId: 'proj-1', title: 'T' }, { sessionId: ROUTER_SESSION, role: 'router' });
+    stack.taskManager.enqueue(task.id, { sessionId: ROUTER_SESSION, role: 'router' });
+    stack.taskManager.markDispatched(task.id, WORKER_SESSION, null);
+    stack.taskManager.markStartupTimeout(task.id);
+    stack.taskManager.retry(task.id, { role: 'system' });
+    const outcome = await tool.execute(
+      { workspace_id: 'ws-1', task_id: task.id, status: 'completed', progress: 100, summary: '迟到交付' },
+      execOf(WORKER_SESSION),
+    );
+    expect((outcome as { reason: string }).reason).toBe('adopted');
+    expect(notices).toHaveLength(1);
+    expect(notices[0]?.message).toContain('【通知】');
+    expect(notices[0]?.message).toContain(task.id);
   });
 });
+
+/** 断言 events 表中指定 type 的事件条数（直查库，机器消费值）。 */
+function countEvents(stack: SupervisorStack, type: string): number {
+  const row = (stack.db as { prepare: (sql: string) => { get: (...args: unknown[]) => unknown } })
+    .prepare('SELECT COUNT(*) AS n FROM events WHERE type = ?')
+    .get(type) as { n: number };
+  return row.n;
+}

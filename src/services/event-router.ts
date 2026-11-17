@@ -55,6 +55,26 @@ export class EventRouter {
     this.threadSubs = new ThreadSubscriptionRepository(db);
   }
 
+  /**
+   * 写入闭环种子规则（FB-4，幂等，由启动序列显式调用）：规则表为空且用户从未保存过
+   * 自定义规则时，预置 supervisor 自身闭环事件 → route_to_router。
+   * 默认 observe 模式下仅留痕（安全）；切换 auto 后即生效派发。
+   * 闭环通知另有硬接线（worker-report-tool / ProjectMonitor 直连 notifier），不依赖本规则。
+   */
+  async ensureCoreRules(): Promise<void> {
+    if (this.rules.list().length > 0) return;
+    if (this.audit.byAction('event.rule.save').length > 0) return;
+    const seeds: Array<{ sourcePattern: string; description: string }> = [
+      { sourcePattern: 'internal.worker_report.rejected', description: 'Worker 汇报被拒（预置闭环规则）' },
+      { sourcePattern: 'internal.task.terminal', description: '任务终态变化（预置闭环规则）' },
+      { sourcePattern: 'internal.task.watchdog_retry', description: '看门狗判死重试（预置闭环规则）' },
+    ];
+    for (const seed of seeds) {
+      await this.rules.save({ sourcePattern: seed.sourcePattern, action: 'route_to_router', description: seed.description });
+    }
+    this.audit.log({ actorRole: 'system', action: 'event.rule.seed', targetType: 'eventRoutingRule', targetId: 'core-rules', detailJson: JSON.stringify({ count: seeds.length }) });
+  }
+
   /** 当前路由模式（默认 observe——安全机制）。 */
   mode(): 'observe' | 'auto' {
     return this.settings.getJson<'observe' | 'auto'>(MODE_KEY) ?? 'observe';

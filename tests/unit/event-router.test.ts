@@ -243,6 +243,39 @@ describe('EventRouter Thread 直通', () => {
   });
 });
 
+describe('EventRouter 闭环种子规则（FB-4）', () => {
+  it('空库调用 ensureCoreRules：预置 3 条 internal 闭环规则（route_to_router），observe 下留痕不派发', async () => {
+    const { router, db, calls } = await setup();
+    await router.ensureCoreRules();
+    const patterns = router.rules.list().map((r) => r.source_pattern).sort();
+    expect(patterns).toEqual(['internal.task.terminal', 'internal.task.watchdog_retry', 'internal.worker_report.rejected']);
+    expect(router.rules.list().every((r) => r.action === 'route_to_router' && r.enabled === 1)).toBe(true);
+    const outcome = await router.route(whEvent('wh-seed-1', 'internal', 'task.terminal'));
+    expect(outcome).toBe('event.observed');
+    expect(calls).toHaveLength(0);
+    db.close();
+  });
+
+  it('用户保存过自定义规则后：ensureCoreRules 不再种子（不覆盖用户配置）', async () => {
+    const { router, db } = await setup();
+    await router.saveRule({ sourcePattern: 'webhook.custom', action: 'ignore' }, ROUTER);
+    await router.ensureCoreRules();
+    expect(router.rules.list().map((r) => r.source_pattern)).toEqual(['webhook.custom']);
+    db.close();
+  });
+
+  it('auto 模式下种子规则生效：internal.worker_report.rejected 派发到 Router 会话', async () => {
+    const { router, db, calls } = await setup();
+    await router.ensureCoreRules();
+    router.setMode('auto', ROUTER);
+    const outcome = await router.route(whEvent('wh-seed-2', 'internal', 'worker_report.rejected'));
+    expect(outcome).toBe('event.routed');
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.sessionId).toBe(ROUTER);
+    db.close();
+  });
+});
+
 describe('EventRouter 批式路由（Phase 5-A）', () => {
   it('route_to_router 命中批处理器：合投不经直发通道，审计带 batched 标记', async () => {
     const { db, calls } = await setup();
