@@ -1,4 +1,4 @@
-﻿/**
+/**
  * task_runs 表 Repository：每次执行尝试一条记录，重试不覆盖历史。
  */
 import type { DatabaseSync } from 'node:sqlite';

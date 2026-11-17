@@ -1,4 +1,4 @@
-﻿/**
+/**
  * events 表 Repository：统一事件流水。event_id 唯一约束实现去重
  * （Schedule 非恰好一次投递的兜底，见 DEVELOPMENT_PLAN §6.5/§8）。
  */

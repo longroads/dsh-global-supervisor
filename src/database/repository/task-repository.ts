@@ -1,4 +1,4 @@
-﻿/**
+/**
  * tasks 表 Repository：任务记录读写与状态字段落库（状态语义校验在 TaskManager，本层只写）。
  */
 import type { DatabaseSync } from 'node:sqlite';

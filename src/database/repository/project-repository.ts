@@ -1,4 +1,4 @@
-﻿/**
+/**
  * projects 表 Repository：受管项目的唯一读写入口（SQL 收敛纪律）。
  */
 import type { DatabaseSync } from 'node:sqlite';
