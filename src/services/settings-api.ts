@@ -16,6 +16,23 @@ interface WebServerLike {
   register(route: unknown): () => void;
 }
 
+/**
+ * 注册单条面板路由（热重载安全，生产反馈 2026-11-17 事故修复）：
+ * - disposer 经 ctx.effect 绑定插件 fiber 生命周期——插件卸载（含热升级换载）时自动释放路由；
+ * - 旧实例路由未释放导致的 duplicate 注册错误降级为警告并沿用旧路由（不再让整条服务栈崩溃，
+ *   否则工具注册被跳过，插件陷入"管理面活着、执行面全灭"的半死状态）。
+ */
+function registerRoute(ctx: Context, webServer: WebServerLike, route: { path: string }): void {
+  try {
+    const dispose = webServer.register(route);
+    ctx.effect(() => dispose);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (!message.includes('duplicate')) throw error;
+    ctx.logger.warn(`settings 路由 ${route.path} 注册撞车（热重载旧实例未释放，沿用旧路由）：${message}`);
+  }
+}
+
 /** GET settings 的响应形态（client 面板消费）。 */
 export interface SessionOption {
   id: string;
@@ -88,7 +105,7 @@ export function redact(text: string): string {
 export async function registerSettingsApi(ctx: Context, stack: SupervisorStack, webhookOptions?: WebhookEventOptions): Promise<void> {
   const webServer = await awaitService<WebServerLike>(ctx, 'webServer');
 
-  webServer.register({
+  const settingsRoute = {
     kind: 'exact',
     path: '/global-supervisor/settings',
     resource: async () => {
@@ -122,9 +139,10 @@ export async function registerSettingsApi(ctx: Context, stack: SupervisorStack, 
       };
       return jsonResponse(payload);
     },
-  });
+  };
+  registerRoute(ctx, webServer, settingsRoute);
 
-  webServer.register({
+  const clientPingRoute = {
     kind: 'exact',
     path: '/global-supervisor/client-ping',
     handler: async (req: IncomingMessage, res: ServerResponse) => {
@@ -149,9 +167,10 @@ export async function registerSettingsApi(ctx: Context, stack: SupervisorStack, 
       await mkdir(path.dirname(file), { recursive: true }).catch(() => undefined);
       await appendFile(file, `${new Date().toISOString()} [client-ping] ${body || '(no-body)'}\n`, 'utf8').catch(() => undefined);
     },
-  });
+  };
+  registerRoute(ctx, webServer, clientPingRoute);
 
-  webServer.register({
+  const claimRoute = {
     kind: 'exact',
     path: '/global-supervisor/claim',
     handler: async (req: IncomingMessage, res: ServerResponse) => {
@@ -179,10 +198,11 @@ export async function registerSettingsApi(ctx: Context, stack: SupervisorStack, 
       res.statusCode = 200;
       res.end(JSON.stringify({ ok: true, router: record }));
     },
-  });
+  };
+  registerRoute(ctx, webServer, claimRoute);
 
   // Webhook 事件路由（ITERATION_PLAN 1-D）：外部系统 POST → redact/截断 → EventManager 统一入口
-  webServer.register({
+  const eventsRoute = {
     kind: 'prefix',
     path: '/global-supervisor/events',
     handler: async (req: IncomingMessage, res: ServerResponse) => {
@@ -236,10 +256,11 @@ export async function registerSettingsApi(ctx: Context, stack: SupervisorStack, 
       res.statusCode = 202;
       res.end(JSON.stringify({ ok: true, inserted: result.inserted, duplicate: !result.inserted }));
     },
-  });
+  };
+  registerRoute(ctx, webServer, eventsRoute);
 
   // 更新检查端点（面板"检查更新"按钮）：强制刷新并返回最新状态
-  webServer.register({
+  const updateCheckRoute = {
     kind: 'exact',
     path: '/global-supervisor/update-check',
     handler: async (req: IncomingMessage, res: ServerResponse) => {
@@ -264,7 +285,8 @@ export async function registerSettingsApi(ctx: Context, stack: SupervisorStack, 
       res.statusCode = 200;
       res.end(JSON.stringify({ ok: true, state }));
     },
-  });
+  };
+  registerRoute(ctx, webServer, updateCheckRoute);
 }
 
 /** 读取并解析 JSON 请求体（超限或畸形返回 undefined；claim 默认 4KB，webhook 可放宽至 64KB）。 */

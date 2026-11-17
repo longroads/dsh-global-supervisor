@@ -22,19 +22,49 @@ interface CapturedRoute {
   handler?: (req: unknown, res: unknown) => Promise<void> | void;
 }
 
-function fakeCtxWithWebServer(): { ctx: Context; routes: CapturedRoute[] } {
+/** fake ctx：webServer 记录注册/注销，effect 收集 disposer（模拟插件 fiber 卸载）。 */
+function fakeCtxWithWebServer(options: { duplicatePaths?: string[]; failPathsWith?: RegExp } = {}): {
+  ctx: Context;
+  routes: CapturedRoute[];
+  unregistered: string[];
+  disposers: Array<() => void>;
+  warnings: string[];
+} {
   const routes: CapturedRoute[] = [];
+  const unregistered: string[] = [];
+  const disposers: Array<() => void> = [];
+  const warnings: string[] = [];
+  const duplicatePaths = options.duplicatePaths ?? [];
+  const failPathsWith = options.failPathsWith;
   const ctx = {
     get: (name: string) =>
       name === 'webServer'
-        ? { register: (route: CapturedRoute) => { routes.push(route); return () => undefined; } }
+        ? {
+            register: (route: CapturedRoute) => {
+              if (duplicatePaths.includes(route.path)) {
+                throw new Error(`duplicate exact route "${route.path}"`);
+              }
+              if (failPathsWith?.test(route.path)) {
+                throw new Error('boom: webserver internal error');
+              }
+              routes.push(route);
+              unregistered.push(`pending:${route.path}`);
+              return () => {
+                unregistered[unregistered.indexOf(`pending:${route.path}`)] = `released:${route.path}`;
+              };
+            },
+          }
         : name === 'workspaceRegistry'
           ? { list: () => [{ id: 'ws-1', path: 'E:\\a', title: 'alpha', sessionIds: ['s-1'], createdAt: '', updatedAt: '' }] }
           : name === 'sessionPersistence'
             ? { list: () => [{ sessionId: 's-1', header: { id: 's-1', cwd: 'E:\\a', createdAt: 1731400000000 }, revision: 1 }] }
             : {},
+    effect: (execute: () => () => void) => {
+      disposers.push(execute());
+    },
+    logger: { warn: (message: string) => warnings.push(message), info: () => undefined, error: () => undefined },
   } as unknown as Context;
-  return { ctx, routes };
+  return { ctx, routes, unregistered, disposers, warnings };
 }
 
 async function buildStack(ctx: Context, projcacheDir?: string): Promise<SupervisorStack> {
@@ -72,6 +102,33 @@ describe('设置面板 HTTP API', () => {
     expect(typeof routes[2]?.handler).toBe('function');
     expect(routes[3]?.kind).toBe('prefix');
     expect(typeof routes[3]?.handler).toBe('function');
+  });
+
+  it('热重载生命周期（2026-11-17 反馈修复）：每条路由 disposer 绑定 ctx.effect，插件卸载时全部释放', async () => {
+    const { ctx, routes, disposers, unregistered } = fakeCtxWithWebServer();
+    const stack = await buildStack(ctx);
+    await registerSettingsApi(ctx, stack);
+    expect(routes).toHaveLength(5);
+    expect(disposers).toHaveLength(5);
+    expect(unregistered.every((entry) => entry.startsWith('pending:'))).toBe(true);
+    // 模拟插件 fiber 卸载：执行全部 effect disposer → 5 条路由全部释放
+    for (const dispose of disposers) dispose();
+    expect(unregistered.every((entry) => entry.startsWith('released:'))).toBe(true);
+    expect(unregistered).toHaveLength(5);
+  });
+
+  it('duplicate 路由（热重载旧实例未释放）降级沿用旧路由，不抛错、其余路由照常注册', async () => {
+    const { ctx, routes, warnings } = fakeCtxWithWebServer({ duplicatePaths: ['/global-supervisor/settings'] });
+    const stack = await buildStack(ctx);
+    await expect(registerSettingsApi(ctx, stack)).resolves.toBeUndefined();
+    expect(routes.map((r) => r.path)).toEqual(['/global-supervisor/client-ping', '/global-supervisor/claim', '/global-supervisor/events', '/global-supervisor/update-check']);
+    expect(warnings.some((w) => w.includes('/global-supervisor/settings') && w.includes('duplicate'))).toBe(true);
+  });
+
+  it('非 duplicate 的注册错误仍上抛（不吞真实故障）', async () => {
+    const { ctx } = fakeCtxWithWebServer({ failPathsWith: /client-ping/ });
+    const stack = await buildStack(ctx);
+    await expect(registerSettingsApi(ctx, stack)).rejects.toThrow('boom');
   });
 
   it('GET settings 返回 workspace 清单与当前 Router（null 表示未设置）', async () => {

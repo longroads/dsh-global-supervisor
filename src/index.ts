@@ -286,8 +286,15 @@ export function apply(ctx: Context, config: PluginConfig): void {
           void stack.eventRouter.route(event);
         });
         // 设置面板 HTTP API（Router 身份管理入口；契约见 docs/UI_PANEL_PLAN.md）
-        const { registerSettingsApi } = await import('./services/settings-api.js');
-        await registerSettingsApi(ctx, stack, config.events);
+        // 热重载事故修复（2026-11-17 反馈）：面板路由注册失败只影响面板，工具注册不再被拖死
+        try {
+          const { registerSettingsApi } = await import('./services/settings-api.js');
+          await registerSettingsApi(ctx, stack, config.events);
+        } catch (error) {
+          const message = error instanceof Error ? error.stack ?? error.message : String(error);
+          void writeLoadMarker('settings-api-failed', { message });
+          ctx.logger.error(`设置面板 API 注册失败（supervisor 工具不受影响）：${message}`);
+        }
         const { buildSupervisorTools } = await import('./tools/supervisor-tools.js');
         const { buildWorkerReportTool } = await import('./tools/worker-report-tool.js');
         const all = [...buildSupervisorTools(stack), buildWorkerReportTool(stack)];
