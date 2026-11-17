@@ -19,18 +19,23 @@ function futureIso(): string {
   return new Date(Date.now() + 30 * 60_000).toISOString();
 }
 
-/** fake agents 服务：agentPresent=false 时 get 返回 undefined（会话冷/Agent 不存在）；status 可配置（宽限测试）。 */
+/** fake agents 服务：agentPresent=false 时 get 返回 undefined（会话冷/Agent 不存在）；status 可配置；steer 调用被捕获。 */
 function fakeAgentService(agentPresent: boolean, status: 'idle' | 'running' = 'idle') {
+  const steers: string[] = [];
   const agent = {
     id: WORKER,
     status,
     options: {},
     followup: () => undefined,
-    steer: () => undefined,
+    steer: (message: unknown) => {
+      const content = (message as { content?: Array<{ text?: string }> }).content;
+      steers.push(content?.[0]?.text ?? '');
+    },
     cancel: () => undefined,
     whenIdle: async () => undefined,
   };
   return {
+    steers,
     get: () => (agentPresent ? agent : undefined),
     list: () => [],
     resume: async () => ({ agent }),
@@ -51,15 +56,17 @@ function fakeSettings(initial: Record<string, number> = {}) {
   };
 }
 
-async function setup(monitorOptions: WatchdogOptions = {}, agentPresent = false, agentStatus: 'idle' | 'running' = 'idle'): Promise<{ monitor: ProjectMonitor; manager: TaskManager; controller: AgentController; db: Awaited<ReturnType<typeof openDatabase>> }> {
+async function setup(monitorOptions: WatchdogOptions = {}, agentPresent = false, agentStatus: 'idle' | 'running' = 'idle'): Promise<{ monitor: ProjectMonitor; manager: TaskManager; controller: AgentController; db: Awaited<ReturnType<typeof openDatabase>>; steers: string[] }> {
   const db = await openDatabase(':memory:');
-  const fakeCtx = { get: (name: string) => (name === 'agents' ? fakeAgentService(agentPresent, agentStatus) : {}) } as unknown as Context;
+  // 固定 fake 实例：ctx.get('agents') 每次返回同一服务，steers 捕获才可靠
+  const agentsService = fakeAgentService(agentPresent, agentStatus);
+  const fakeCtx = { get: (name: string) => (name === 'agents' ? agentsService : {}) } as unknown as Context;
   const manager = new TaskManager(db);
   manager.projects.create({ id: 'proj-1', workspaceId: 'ws-1', name: 'P1', workerSessionId: WORKER });
   const adapter = new DshAgentAdapter(fakeCtx);
   const controller = new AgentController(adapter, manager, db);
   const monitor = new ProjectMonitor(manager, controller, undefined, { agents: adapter, ...monitorOptions });
-  return { monitor, manager, controller, db };
+  return { monitor, manager, controller, db, steers: agentsService.steers };
 }
 
 function runningTask(manager: TaskManager, timeoutAt: string | null): string {
@@ -162,12 +169,13 @@ describe('ProjectMonitor 四分类增强（Phase 5-C）', () => {
     expect(notified[0]?.message).toContain(taskId);
   });
 
-  it('idle：Worker 会话空闲过久且无汇报 → 疑点升级（info，不代答）', async () => {
+  it('idle：Worker 会话空闲过久且无汇报 → 先催告心跳再 warning 升级（FB-11 两段式；推送隔离下验证）', async () => {
     const notified: Notice[] = [];
-    const { monitor, manager, db } = await setup(
+    const { monitor, manager, db, steers } = await setup(
       {
         idleStaleMs: 1_000,
         startingTimeoutMs: 60 * 60 * 1000,
+        settings: fakeSettings({ 'watchdog.progressPushIntervalMs': 0 }),
         notify: async (message, severity) => {
           notified.push({ message, severity });
           return true;
@@ -182,15 +190,19 @@ describe('ProjectMonitor 四分类增强（Phase 5-C）', () => {
     expect(scan.idleSuspects).toEqual([taskId]);
     expect(scan.lost).toEqual([]);
     expect(notified).toHaveLength(1);
-    expect(notified[0]?.severity).toBe('info');
+    expect(notified[0]?.severity).toBe('warning');
+    expect(notified[0]?.message).toContain('已催告心跳');
+    expect(steers).toHaveLength(1);
+    expect(steers[0]).toContain('心跳催告');
     expect(manager.tasks.byId(taskId)?.status).toBe('running');
   });
 
-  it('lost：Agent 连续两轮扫描不存在才判定（双探），critical 通知', async () => {
+  it('lost：Agent 连续两轮扫描不存在才判定（双探），critical 通知（推送隔离下验证）', async () => {
     const notified: Notice[] = [];
     const { monitor, manager, db } = await setup({
       idleStaleMs: 1_000,
       startingTimeoutMs: 60 * 60 * 1000,
+      settings: fakeSettings({ 'watchdog.progressPushIntervalMs': 0 }),
       notify: async (message, severity) => {
         notified.push({ message, severity });
         return true;
@@ -257,6 +269,80 @@ describe('ProjectMonitor 看门狗修复（FB-2/FB-4/FB-7）', () => {
     expect(events).toHaveLength(0);
     expect(manager.tasks.byId(taskId)?.status).toBe('canceled');
     db.close();
+  });
+
+  it('FB-11 催告去抖：idleStale 窗口内第二轮不重复 steer，告警文案标注去抖中', async () => {
+    const notified: Notice[] = [];
+    const { monitor, manager, db, steers } = await setup(
+      {
+        idleStaleMs: 60 * 60 * 1000,
+        startingTimeoutMs: 60 * 60 * 1000,
+        settings: fakeSettings({ 'watchdog.progressPushIntervalMs': 0 }),
+        notify: async (message, severity) => {
+          notified.push({ message, severity });
+          return true;
+        },
+      },
+      true,
+    );
+    const taskId = runningTask(manager, futureIso());
+    manager.applyWorkerReport(parseWorkerReport({ workspace_id: 'ws-1', task_id: taskId, status: 'running', progress: 50 }), WORKER);
+    // 回拨 2 小时（超过 1 小时的 idleStale 窗口触发超龄；去抖窗口 = idleStale = 1 小时，两轮扫描都在窗口内）
+    db.prepare('UPDATE tasks SET last_report_at = ? WHERE id = ?').run(new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString(), taskId);
+    await monitor.scanOnce();
+    await monitor.scanOnce();
+    expect(steers).toHaveLength(1);
+    expect(notified).toHaveLength(2);
+    expect(notified[0]?.message).toContain('已催告心跳');
+    expect(notified[1]?.message).toContain('去抖');
+  });
+
+  it('FB-12/13 零 LLM 快照与巡检摘要：每轮扫描落 progress_snapshot 与 patrol.summary 事件', async () => {
+    const { monitor, manager, db } = await setup({
+      startingTimeoutMs: 60 * 60 * 1000,
+      settings: fakeSettings({ 'watchdog.progressPushIntervalMs': 0 }),
+    });
+    runningTask(manager, futureIso());
+    await monitor.scanOnce();
+    const snapshots = db.prepare("SELECT * FROM events WHERE type = 'task.progress_snapshot'").all() as Array<{ payload_json: string }>;
+    expect(snapshots).toHaveLength(1);
+    const snapshot = JSON.parse(snapshots[0]?.payload_json ?? '{}') as { agentStatus?: string; lastReportAgeSec?: number | null };
+    expect(snapshot.agentStatus).toBe('absent');
+    expect(snapshot.lastReportAgeSec).toBeNull();
+    const patrol = db.prepare("SELECT * FROM events WHERE type = 'patrol.summary'").all() as Array<{ payload_json: string }>;
+    expect(patrol).toHaveLength(1);
+    expect((JSON.parse(patrol[0]?.payload_json ?? '{}') as { runningCount?: number }).runningCount).toBe(1);
+  });
+
+  it('FB-12 进度推送：首轮即推汇总 info 且含任务 ID；间隔未到不重复；0 关闭', async () => {
+    const notified: Notice[] = [];
+    const on = await setup({
+      startingTimeoutMs: 60 * 60 * 1000,
+      notify: async (message, severity) => {
+        notified.push({ message, severity });
+        return true;
+      },
+    });
+    const taskId = runningTask(on.manager, futureIso());
+    await on.monitor.scanOnce();
+    const pushes = notified.filter((n) => n.severity === 'info' && n.message.includes('运行中任务'));
+    expect(pushes).toHaveLength(1);
+    expect(pushes[0]?.message).toContain(taskId);
+    await on.monitor.scanOnce();
+    expect(notified.filter((n) => n.severity === 'info' && n.message.includes('运行中任务'))).toHaveLength(1);
+
+    const offNotified: Notice[] = [];
+    const off = await setup({
+      startingTimeoutMs: 60 * 60 * 1000,
+      settings: fakeSettings({ 'watchdog.progressPushIntervalMs': 0 }),
+      notify: async (message, severity) => {
+        offNotified.push({ message, severity });
+        return true;
+      },
+    });
+    runningTask(off.manager, futureIso());
+    await off.monitor.scanOnce();
+    expect(offNotified).toHaveLength(0);
   });
 
   it('判死重试发 warning 通知、重试预算耗尽发 critical 通知（FB-4）', async () => {

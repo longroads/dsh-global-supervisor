@@ -634,7 +634,42 @@ describe('supervisor_watchdog_config 与纳管引导（FB-2/FB-8）', () => {
   it('无参调用返回当前缺省配置', async () => {
     const stack = await buildStack();
     const result = await findTool(stack, 'supervisor_watchdog_config').execute({}, execOf(ROUTER_SESSION));
-    expect(result).toEqual({ ok: true, starting_timeout_ms: 600_000, approval_timeout_ms: 60_000, idle_stale_ms: 600_000, scan_interval_ms: 300_000 });
+    expect(result).toEqual({
+      ok: true,
+      starting_timeout_ms: 600_000,
+      approval_timeout_ms: 60_000,
+      idle_stale_ms: 600_000,
+      scan_interval_ms: 300_000,
+      heartbeat_interval_ms: 300_000,
+      progress_push_interval_ms: 900_000,
+    });
+  });
+
+  it('心跳契约参数：heartbeat KV 落库；progress_push 显式 0 合法（关闭）', async () => {
+    const stack = await buildStack();
+    const tool = findTool(stack, 'supervisor_watchdog_config');
+    const updated = await tool.execute({ heartbeat_interval_ms: 120_000, progress_push_interval_ms: 0 }, execOf(ROUTER_SESSION));
+    expect((updated as { heartbeat_interval_ms: number }).heartbeat_interval_ms).toBe(120_000);
+    expect((updated as { progress_push_interval_ms: number }).progress_push_interval_ms).toBe(0);
+    const again = await tool.execute({}, execOf(ROUTER_SESSION));
+    expect((again as { heartbeat_interval_ms: number }).heartbeat_interval_ms).toBe(120_000);
+    expect((again as { progress_push_interval_ms: number }).progress_push_interval_ms).toBe(0);
+    // monitor 与 AgentController 读同一 KV：生效值联动
+    expect(stack.monitor.effectiveConfig().heartbeatIntervalMs).toBe(120_000);
+    expect(stack.monitor.effectiveConfig().progressPushIntervalMs).toBe(0);
+  });
+
+  it('FB-11 心跳契约：派发指令注入周期心跳要求（协议层强制，不再靠任务描述自觉）', async () => {
+    const stack = await buildStack();
+    const task = stack.taskManager.createTask({ projectId: 'proj-1', title: '长任务' }, { sessionId: ROUTER_SESSION, role: 'router' });
+    stack.taskManager.enqueue(task.id, { sessionId: ROUTER_SESSION, role: 'router' });
+    const dispatch = await stack.agentController.dispatchTask(task.id);
+    expect(dispatch.dispatched).toBe(true);
+    // 锚定派发指令本体（跨测试的异步通知残留可能占据 followups[0]）
+    const instruction = agentSpies.followups.find((f) => f.includes('【任务派发】'));
+    expect(instruction).toContain('心跳契约');
+    expect(instruction).toContain('worker_report');
+    expect(instruction).toContain('status=running');
   });
 
   it('设置启动窗口：KV 落库且再次查询返回新值；审计留痕', async () => {

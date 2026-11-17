@@ -6,8 +6,10 @@
 import type { DshAgentAdapter } from '../adapters/dsh-agent.js';
 import type { ModelPrefInput } from '../adapters/dsh-agent.js';
 import type { DatabaseSync } from 'node:sqlite';
+import { PluginSettingRepository } from '../database/repository/plugin-setting-repository.js';
 import type { ReleaseHandle } from './model-queue.js';
 import { ModelQueue } from './model-queue.js';
+import { WATCHDOG_SETTING_KEYS } from './project-monitor.js';
 import type { ReportOutcome } from './task-manager.js';
 import { TaskManager } from './task-manager.js';
 import type { WorkerReport } from '../protocols/worker-report.js';
@@ -43,6 +45,8 @@ function parseModelPref(json: string | null | undefined): ModelPrefInput | undef
 export class AgentController {
   private readonly queue: ModelQueue;
   private readonly permits = new Map<string, ReleaseHandle>();
+  /** 心跳契约 KV 源（与 ProjectMonitor 共用 watchdog.heartbeatIntervalMs 键）。 */
+  private readonly pluginSettings: PluginSettingRepository;
 
   constructor(
     private readonly agents: DshAgentAdapter,
@@ -51,6 +55,13 @@ export class AgentController {
     maxConcurrency = 1,
   ) {
     this.queue = new ModelQueue(maxConcurrency);
+    this.pluginSettings = new PluginSettingRepository(db);
+  }
+
+  /** 心跳契约间隔（缺省 5 分钟；须小于 idleStaleMs 否则契约必然违约）。 */
+  private heartbeatIntervalMs(): number {
+    const configured = this.pluginSettings.getJson<number>(WATCHDOG_SETTING_KEYS.heartbeatIntervalMs);
+    return typeof configured === 'number' && Number.isFinite(configured) && configured > 0 ? configured : 5 * 60 * 1000;
   }
 
   /**
@@ -177,8 +188,9 @@ export class AgentController {
     return this.permits.size;
   }
 
-  /** 组装任务指令文本（含 worker_report 汇报要求）。 */
+  /** 组装任务指令文本（含 worker_report 汇报要求与心跳契约——FB-11 协议层强制）。 */
   private buildInstruction(taskId: string, title: string, description: string): string {
+    const heartbeatMinutes = Math.max(1, Math.round(this.heartbeatIntervalMs() / 60000));
     return [
       `【任务派发】${taskId}`,
       `标题：${title}`,
@@ -186,6 +198,8 @@ export class AgentController {
       '',
       '执行要求：完成或状态变化时调用 worker_report 工具汇报（workspace_id/task_id/status/progress/summary），',
       `其中 task_id 必须为 ${taskId}；任务完成时 status=completed。`,
+      `心跳契约：执行预计超过 ${heartbeatMinutes} 分钟时，必须每 ${heartbeatMinutes} 分钟调用一次 worker_report（status=running，progress/summary 简述当前进展）；`,
+      '超时未收到心跳将触发系统催告并升级通知管理端。',
     ]
       .filter((line) => line !== '')
       .join('\n');
