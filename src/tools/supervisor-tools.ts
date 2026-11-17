@@ -5,6 +5,8 @@
  */
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools';
 import type { EventRoutingAction } from '../database/repository/event-routing-rule-repository.js';
+import { MEMORY_CATEGORIES } from '../database/repository/memory-repository.js';
+import type { MemoryCategory } from '../database/repository/memory-repository.js';
 import { PluginSettingRepository } from '../database/repository/plugin-setting-repository.js';
 import type { SupervisorStack } from '../runtime.js';
 import { WATCHDOG_SETTING_KEYS } from '../services/project-monitor.js';
@@ -170,12 +172,14 @@ export function buildSupervisorTools(stack: SupervisorStack): ToolDefinition[] {
 
   tools.push(makeTool({
     name: 'supervisor_task_create',
-    description: '创建任务（pending 起步，需 supervisor_task_assign 派发；depends_on 为前置任务 ID 数组）。project_id 与 workspace_id 二选一——传 workspace_id 时自动解析对应受管项目。带 source_event_id 时自动订阅该事件所属 Thread（同 Thread 后续事件直通本任务 Worker）',
+    description: '创建任务（pending 起步，需 supervisor_task_assign 派发；depends_on 为前置任务 ID 数组）。project_id 与 workspace_id 二选一——传 workspace_id 时自动解析对应受管项目。带 source_event_id 时自动订阅该事件所属 Thread（同 Thread 后续事件直通本任务 Worker）。category 决定差异化跟进节奏（可用 supervisor_watchdog_config 的 category_overrides 按分类覆盖心跳/超时）；acceptance 为验收条件（注入派发指令，Worker 完成时需对照并附 evidence 佐证）',
     parameters: OBJ({
       project_id: { type: 'string' }, workspace_id: { type: 'string', description: 'DSH workspace ID（与 project_id 二选一）' }, title: { type: 'string' }, description: { type: 'string' },
       priority: { type: 'integer' }, due_at: { type: 'string', description: 'RFC3339 截止时间' },
       depends_on: { type: 'array', items: { type: 'string' } },
       source_event_id: { type: 'string', description: '来源事件 ID（supervisor_event_list 可查）；该事件带 thread_id 时本任务自动订阅其 Thread' },
+      category: { type: 'string', description: '任务分类：inspection（巡检）/ investigation（排查）/ development（开发）/ maintenance（维护）/ daily（日常）或自定义；未分类走全局缺省节奏' },
+      acceptance: { type: 'string', description: '验收条件（派发契约）：明确可判定的完成标准，如"报告文件写入 <路径>""命令 X 输出含 Y"；Worker 完成时需对照并附 evidence（文件路径或输出摘要）' },
     }, ['title']),
     resultSchema: RESULT,
     guard, guardDeniedMessage: DENIED,
@@ -193,6 +197,8 @@ export function buildSupervisorTools(stack: SupervisorStack): ToolDefinition[] {
             dueAt: optionalStringArg(record, 'due_at'),
             dependsOn: deps,
             sourceEventId: optionalStringArg(record, 'source_event_id'),
+            category: optionalStringArg(record, 'category'),
+            acceptance: optionalStringArg(record, 'acceptance'),
           },
           { sessionId: ctx.callerSessionId, role: 'router' },
         );
@@ -252,12 +258,18 @@ export function buildSupervisorTools(stack: SupervisorStack): ToolDefinition[] {
         const sessionId = optionalStringArg(record, 'session_id');
         if (sessionId !== undefined) override = { sessionId };
       }
-      try {
-        stack.taskManager.enqueue(taskId, { sessionId: ctx.callerSessionId, role: 'router' });
-      } catch (error) {
-        return { ok: false, error: error instanceof Error ? error.message : String(error) };
+      // 幂等入队：仅 pending 需要入队（断路器拒派等场景任务已处于 queued，重复 assign 直接走派发）
+      if (stack.taskManager.tasks.byId(taskId)?.status === 'pending') {
+        try {
+          stack.taskManager.enqueue(taskId, { sessionId: ctx.callerSessionId, role: 'router' });
+        } catch (error) {
+          return { ok: false, error: error instanceof Error ? error.message : String(error) };
+        }
       }
       const dispatch = await stack.agentController.dispatchTask(taskId, override);
+      if (!dispatch.dispatched && dispatch.reason === 'session-degenerated') {
+        return { ok: false, dispatch, error: '项目 Worker 会话对本任务连续 2 次失败（疑似退化）——建议 fresh_session=true 换新会话重派，或 session_id 指定其他会话' };
+      }
       return { ok: dispatch.dispatched, dispatch, ...(override !== undefined ? { session_id: override.sessionId, session_scope: 'task' } : {}) };
     },
   }));
@@ -659,6 +671,7 @@ export function buildSupervisorTools(stack: SupervisorStack): ToolDefinition[] {
       scan_interval_ms: { type: 'integer', description: '扫描间隔毫秒（60000-86400000）' },
       heartbeat_interval_ms: { type: 'integer', description: '心跳契约间隔毫秒（1000-86400000，派发时注入指令）' },
       progress_push_interval_ms: { type: 'integer', description: '运行期进度推送间隔毫秒（0=关闭；1000-86400000）' },
+      category_overrides: { type: 'object', description: '分类级节奏覆盖表（对象键用 camelCase：{分类名:{startingTimeoutMs?,idleStaleMs?,heartbeatIntervalMs?}}，值为毫秒；整体替换）' },
     }),
     resultSchema: RESULT,
     guard, guardDeniedMessage: DENIED,
@@ -683,14 +696,17 @@ export function buildSupervisorTools(stack: SupervisorStack): ToolDefinition[] {
       if (scan !== undefined) settings.setJson(WATCHDOG_SETTING_KEYS.scanIntervalMs, scan);
       if (heartbeat !== undefined) settings.setJson(WATCHDOG_SETTING_KEYS.heartbeatIntervalMs, heartbeat);
       if (progressPush !== undefined) settings.setJson(WATCHDOG_SETTING_KEYS.progressPushIntervalMs, progressPush);
-      if (starting !== undefined || approval !== undefined || idle !== undefined || scan !== undefined || heartbeat !== undefined || progressPush !== undefined) {
+      const overridesRaw = record['category_overrides'];
+      const overrides = typeof overridesRaw === 'object' && overridesRaw !== null && !Array.isArray(overridesRaw) ? (overridesRaw as Record<string, Record<string, number>>) : undefined;
+      if (overrides !== undefined) settings.setJson(WATCHDOG_SETTING_KEYS.categoryOverrides, overrides);
+      if (starting !== undefined || approval !== undefined || idle !== undefined || scan !== undefined || heartbeat !== undefined || progressPush !== undefined || overrides !== undefined) {
         stack.taskManager.audit.log({
           actorSessionId: ctx.callerSessionId,
           actorRole: 'router',
           action: 'watchdog.config.set',
           targetType: 'watchdogConfig',
           targetId: 'watchdog',
-          detailJson: JSON.stringify({ startingTimeoutMs: starting ?? null, approvalTimeoutMs: approval ?? null, idleStaleMs: idle ?? null, scanIntervalMs: scan ?? null, heartbeatIntervalMs: heartbeat ?? null, progressPushIntervalMs: progressPush ?? null }),
+          detailJson: JSON.stringify({ startingTimeoutMs: starting ?? null, approvalTimeoutMs: approval ?? null, idleStaleMs: idle ?? null, scanIntervalMs: scan ?? null, heartbeatIntervalMs: heartbeat ?? null, progressPushIntervalMs: progressPush ?? null, categoryOverrides: overrides ?? null }),
         });
       }
       const current = stack.monitor.effectiveConfig();
@@ -702,6 +718,7 @@ export function buildSupervisorTools(stack: SupervisorStack): ToolDefinition[] {
         scan_interval_ms: scan ?? current.scanIntervalMs,
         heartbeat_interval_ms: heartbeat ?? current.heartbeatIntervalMs,
         progress_push_interval_ms: progressPush ?? current.progressPushIntervalMs,
+        category_overrides: overrides ?? settings.getJson<Record<string, unknown>>(WATCHDOG_SETTING_KEYS.categoryOverrides) ?? {},
       };
     },
   }));
@@ -734,6 +751,118 @@ export function buildSupervisorTools(stack: SupervisorStack): ToolDefinition[] {
       } catch (error) {
         return { ok: false, error: `session-create-failed: ${error instanceof Error ? error.message : String(error)}` };
       }
+    },
+  }));
+
+  tools.push(makeTool({
+    name: 'supervisor_memory_save',
+    description: '保存/更新长期记忆（0.7.2 记忆地基）：preference（用户偏好）/ fact（既定事实）/ routine（惯例）/ commitment（承诺——开放回路，简报持续跟踪直至闭环）。同 category+content 幂等。带 memory_id + close=true 时闭环该承诺（用户已完成跟进）。用户表达偏好、陈述事实、或承诺亲自做某事时，应主动调用本工具登记',
+    parameters: OBJ({
+      category: { type: 'string', description: 'preference / fact / routine / commitment' },
+      content: { type: 'string', description: '记忆内容（commitment 用"谁 + 做什么 + 大致时限"句式）' },
+      memory_id: { type: 'string', description: '已存在记忆的 ID（闭环或更新时提供）' },
+      close: { type: 'boolean', description: 'true 时闭环该承诺（开放回路收口，需配合 memory_id）' },
+    }, ['category', 'content']),
+    resultSchema: RESULT,
+    guard, guardDeniedMessage: DENIED,
+    handler: async (args, ctx) => {
+      const record = asRecord(args);
+      const category = stringArg(record, 'category');
+      if (!(MEMORY_CATEGORIES as readonly string[]).includes(category)) {
+        return { ok: false, error: `category 必须是 ${MEMORY_CATEGORIES.join(' / ')} 之一` };
+      }
+      const memoryId = optionalStringArg(record, 'memory_id');
+      if (record['close'] === true) {
+        if (memoryId === undefined) return { ok: false, error: 'close 需要 memory_id（supervisor_memory_list 可查）' };
+        const closed = stack.agentController.memories.close(memoryId);
+        if (closed) {
+          stack.taskManager.audit.log({ actorSessionId: ctx.callerSessionId, actorRole: 'router', action: 'memory.close', targetType: 'memory', targetId: memoryId });
+        }
+        return { ok: closed, memory_id: memoryId };
+      }
+      const row = await stack.agentController.memories.save({ category: category as MemoryCategory, content: stringArg(record, 'content'), source: 'router' });
+      stack.taskManager.audit.log({ actorSessionId: ctx.callerSessionId, actorRole: 'router', action: 'memory.save', targetType: 'memory', targetId: row.id, detailJson: JSON.stringify({ category }) });
+      return { ok: true, memory: row };
+    },
+  }));
+
+  tools.push(makeTool({
+    name: 'supervisor_memory_list',
+    description: '查询长期记忆（category 可选过滤 preference/fact/routine/commitment；include_closed=true 含已闭环承诺）。生成简报、派发任务、回答"我之前说过什么"时使用',
+    parameters: OBJ({
+      category: { type: 'string', description: 'preference / fact / routine / commitment（可选）' },
+      include_closed: { type: 'boolean', description: '包含已闭环的承诺（默认仅未闭环）' },
+    }),
+    resultSchema: RESULT,
+    guard, guardDeniedMessage: DENIED,
+    handler: async (args) => {
+      const record = asRecord(args);
+      const category = optionalStringArg(record, 'category');
+      const valid = category === undefined || (MEMORY_CATEGORIES as readonly string[]).includes(category);
+      if (!valid) return { ok: false, error: `category 必须是 ${MEMORY_CATEGORIES.join(' / ')} 之一` };
+      const rows = stack.agentController.memories.list(category as MemoryCategory | undefined, record['include_closed'] === true);
+      return { ok: true, count: rows.length, memories: rows };
+    },
+  }));
+
+  tools.push(makeTool({
+    name: 'supervisor_briefing',
+    description: '生成每日简报数据（0.7.2，零 LLM 收集——所有数字来自本地数据库，无需模型调用；Router 拿到后可整理转述给用户）。含：运行中任务×分类与进度、待人工决策、近期失败、各项目目标进度（goals）、开放回路（未闭环承诺）、近 7 天完成/失败统计与分类分布。建议配合 supervisor_schedule_set 每晨自动调用形成晨报习惯',
+    parameters: OBJ({}),
+    resultSchema: RESULT,
+    guard, guardDeniedMessage: DENIED,
+    handler: async () => {
+      const nowMs = Date.now();
+      const dayAgo = new Date(nowMs - 24 * 3600_000).toISOString();
+      const weekAgo = new Date(nowMs - 7 * 24 * 3600_000).toISOString();
+      const running = stack.taskManager.tasks.list({ status: 'running' }).map((t) => {
+        const report = stack.taskManager.reports.latestOf(t.id);
+        const ageMs = t.last_report_at === null ? null : nowMs - Date.parse(t.last_report_at);
+        return {
+          id: t.id, title: t.title, category: t.category,
+          progress: report?.progress ?? null, summary: report?.summary ?? null,
+          last_report_age_min: ageMs === null ? null : Math.round(ageMs / 60000),
+        };
+      });
+      const needHuman = stack.taskManager.tasks.list({ status: 'need_human' }).map((t) => ({ id: t.id, title: t.title }));
+      const failedRecent = stack.taskManager.tasks.list({ status: 'failed' }).filter((t) => t.updated_at >= dayAgo).map((t) => ({ id: t.id, title: t.title, retry_count: t.retry_count }));
+      const goals = stack.taskManager.projects.list().map((p) => {
+        let goalList: string[] = [];
+        try {
+          const parsed = p.goals_json !== null ? (JSON.parse(p.goals_json) as unknown) : [];
+          if (Array.isArray(parsed) && parsed.every((g) => typeof g === 'string')) goalList = parsed;
+        } catch {
+          goalList = [];
+        }
+        const projectTasks = stack.taskManager.tasks.list({ projectId: p.id });
+        return {
+          project: p.name, workspace_id: p.workspace_id, health: p.health, goals: goalList,
+          running: projectTasks.filter((t) => t.status === 'running').length,
+          completed_7d: projectTasks.filter((t) => t.status === 'completed' && t.updated_at >= weekAgo).length,
+        };
+      });
+      const openLoops = stack.agentController.memories.list('commitment').map((m) => ({ id: m.id, content: m.content, since: m.created_at.slice(0, 10) }));
+      const completedWeek = stack.taskManager.tasks.list({ status: 'completed' }).filter((t) => t.updated_at >= weekAgo);
+      const categoryDist: Record<string, number> = {};
+      for (const t of completedWeek) {
+        const key = t.category ?? '未分类';
+        categoryDist[key] = (categoryDist[key] ?? 0) + 1;
+      }
+      return {
+        ok: true,
+        generated_at: new Date(nowMs).toISOString(),
+        running,
+        need_human: needHuman,
+        failed_recent_24h: failedRecent,
+        goals,
+        open_loops: openLoops,
+        weekly: {
+          completed_7d: completedWeek.length,
+          retried_share: completedWeek.length === 0 ? 0 : Math.round((completedWeek.filter((t) => t.retry_count > 0).length / completedWeek.length) * 100),
+          category_distribution: categoryDist,
+        },
+        guidance: '可整理为晨报转述用户；开放回路中的承诺若已完成，用 supervisor_memory_save(memory_id, close=true) 闭环',
+      };
     },
   }));
 

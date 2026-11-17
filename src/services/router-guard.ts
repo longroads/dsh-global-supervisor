@@ -12,6 +12,9 @@ import type { ProjectRow, RoutingRuleRow } from '../types/index.js';
 /** 纠正类关键词集：用户终止 Router 自执行的信号（FB-6 纠正即学习）。 */
 const CORRECTION_KEYWORDS: readonly string[] = ['停止', '不是你跑', '不是你执行', '别自己', '停下'];
 
+/** 承诺类关键词集：用户亲自跟进的承诺信号（0.7.2 开放回路——建议登记 commitment 记忆）。 */
+const COMMITMENT_KEYWORDS: readonly string[] = ['我去', '我来', '我回头', '稍后我', '明天我', '我稍后', '我自己来'];
+
 /** 越权告警去抖窗口（毫秒）：同 agentId+path 5 分钟内只告警一次。 */
 const TOOL_ALERT_DEDUP_MS = 5 * 60_000;
 
@@ -29,7 +32,9 @@ const TOOL_ALERT_TEMPLATE = (toolName: string, path: string): string =>
 const ROUTE_PROMPT_HEADER =
   '此请求命中路由偏好：应创建任务派发给对应 workspace 的 Worker（supervisor_task_assign），而非在本会话直接执行。命中规则：';
 
-/** 纠正即学习提示文案（含机器可判别值：supervisor_routing_save）。 */
+/** 承诺即登记提示文案（含机器可判别值：supervisor_memory_save / commitment）。 */
+const COMMITMENT_PROMPT =
+  '检测到用户承诺亲自跟进某事项（开放回路）：请调用 supervisor_memory_save（category=commitment，content="谁+做什么+大致时限"）登记该承诺——supervisor_briefing 会持续跟踪直至闭环，避免遗忘。';
 const CORRECTION_PROMPT =
   '检测到用户终止/纠正类消息：当前请求不应由本会话继续自执行。请确认用户意图，并建议使用 supervisor_routing_save 将该职责归属固化为路由规则，后续同类请求将自动派发给对应 workspace 的 Worker。';
 
@@ -129,7 +134,16 @@ export class RouterGuard {
         return;
       }
       const keyword = CORRECTION_KEYWORDS.find((word) => content.includes(word));
-      if (keyword === undefined) return;
+      if (keyword === undefined) {
+        // 0.7.2 开放回路：承诺信号 → 建议登记 commitment 记忆（简报持续跟踪）
+        const commitWord = COMMITMENT_KEYWORDS.find((word) => content.includes(word));
+        if (commitWord === undefined) return;
+        const commitKey = `commit|${agentId}|${commitWord}`;
+        if (this.isDebounced(this.promptDebounce, commitKey, PROMPT_DEDUP_MS)) return;
+        await this.deps.steer(agentId, COMMITMENT_PROMPT);
+        this.promptDebounce.set(commitKey, this.now());
+        return;
+      }
       const key = `correct|${agentId}|${keyword}`;
       if (this.isDebounced(this.promptDebounce, key, PROMPT_DEDUP_MS)) return;
       await this.deps.steer(agentId, CORRECTION_PROMPT);

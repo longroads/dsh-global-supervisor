@@ -24,6 +24,7 @@ export function buildWorkerReportTool(stack: SupervisorStack): ToolDefinition {
         blockers: { type: 'array', items: { type: 'string' }, description: '阻碍清单' },
         need_human: { type: 'boolean', description: '是否需要人工决策' },
         suggested_actions: { type: 'array', items: { type: 'string' }, description: '建议后续动作' },
+        evidence: { type: 'string', description: '完成证据：结果文件绝对路径或关键输出摘要（任务带验收条件时用于系统核验）' },
       },
       required: ['workspace_id', 'task_id', 'status'],
     },
@@ -78,6 +79,10 @@ export function buildWorkerReportTool(stack: SupervisorStack): ToolDefinition {
             terminal === 'completed' ? 'info' : 'warning',
           );
         }
+        // 0.7.2 派发契约轻验证：有验收条件的 completed 汇报核验 evidence（文件存在 + mtime 晚于本次 run 开始）
+        if (terminal === 'completed') {
+          void verifyCompletionEvidence(stack, report.taskId, report.evidence);
+        }
         void stack.eventManager.ingest({
           eventId: `task-terminal:${report.taskId}:${outcome.taskStatus}:${Date.now()}`,
           source: 'internal',
@@ -96,4 +101,50 @@ export function buildWorkerReportTool(stack: SupervisorStack): ToolDefinition {
       return outcome;
     },
   });
+}
+
+/** 证据是否为文件绝对路径形态（Unix / 开头或 Windows 盘符开头）。 */
+function looksLikeAbsolutePath(text: string): boolean {
+  return text.startsWith('/') || /^[A-Za-z]:[\\/]/.test(text);
+}
+
+/**
+ * 0.7.2 完成轻验证（零 LLM）：任务带验收条件时核验 evidence——
+ * - evidence 为绝对路径 → 检查文件存在且 mtime 晚于本次 run 开始（产出确为本次执行产物）；
+ * - evidence 缺失或非路径 → 标记未验证（verified=0），提醒补证；
+ * - 任务无验收条件 → 不验证（verified 保持 NULL）。
+ * 验证结果写任务行与审计；不改变 completed 状态（轻验证不拦截，只标注可信度）。
+ */
+async function verifyCompletionEvidence(stack: SupervisorStack, taskId: string, evidence: string | undefined): Promise<void> {
+  try {
+    const task = stack.taskManager.tasks.byId(taskId);
+    if (!task || task.acceptance === null) return;
+    let verified: 0 | 1 = 0;
+    let detail = 'evidence 缺失或非文件路径，未验证';
+    if (evidence !== undefined && looksLikeAbsolutePath(evidence)) {
+      const { stat } = await import('node:fs/promises');
+      const stats = await stat(evidence).catch(() => undefined);
+      if (stats === undefined) {
+        detail = `证据文件不存在：${evidence}`;
+      } else {
+        const run = stack.taskManager.runs.byTask(taskId).find((r) => r.ended_at !== null);
+        const runStartedMs = run !== undefined ? Date.parse(run.started_at) : 0;
+        verified = stats.mtimeMs >= runStartedMs ? 1 : 0;
+        detail = verified === 1 ? `证据文件核验通过（mtime 晚于派发）：${evidence}` : `证据文件早于派发时间（疑似旧产物）：${evidence}`;
+      }
+    }
+    stack.taskManager.tasks.setVerified(taskId, verified);
+    stack.taskManager.audit.log({
+      actorRole: 'system',
+      action: 'task.verification',
+      targetType: 'task',
+      targetId: taskId,
+      detailJson: JSON.stringify({ verified, evidence: evidence ?? null, acceptance: task.acceptance }),
+    });
+    if (verified === 0) {
+      await stack.notifier.notify(`任务 ${taskId} 完成但证据未通过核验（${detail}）——验收条件：${task.acceptance}`, 'warning').catch(() => false);
+    }
+  } catch {
+    // 验证是旁路增强：内部故障只降级为本次未验证，不影响已 accepted 的汇报
+  }
 }

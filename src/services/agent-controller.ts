@@ -6,10 +6,11 @@
 import type { DshAgentAdapter } from '../adapters/dsh-agent.js';
 import type { ModelPrefInput } from '../adapters/dsh-agent.js';
 import type { DatabaseSync } from 'node:sqlite';
+import { MemoryRepository } from '../database/repository/memory-repository.js';
 import { PluginSettingRepository } from '../database/repository/plugin-setting-repository.js';
 import type { ReleaseHandle } from './model-queue.js';
 import { ModelQueue } from './model-queue.js';
-import { WATCHDOG_SETTING_KEYS } from './project-monitor.js';
+import { readCategoryOverrides, WATCHDOG_SETTING_KEYS } from './project-monitor.js';
 import type { ReportOutcome } from './task-manager.js';
 import { TaskManager } from './task-manager.js';
 import type { WorkerReport } from '../protocols/worker-report.js';
@@ -17,7 +18,7 @@ import type { WorkerReport } from '../protocols/worker-report.js';
 /** 派发结果（机器消费值）。 */
 export interface DispatchResult {
   dispatched: boolean;
-  reason: 'ok' | 'no-worker-session' | 'busy' | 'task-missing' | 'adopted';
+  reason: 'ok' | 'no-worker-session' | 'busy' | 'task-missing' | 'adopted' | 'session-degenerated';
   taskId: string;
 }
 
@@ -47,6 +48,8 @@ export class AgentController {
   private readonly permits = new Map<string, ReleaseHandle>();
   /** 心跳契约 KV 源（与 ProjectMonitor 共用 watchdog.heartbeatIntervalMs 键）。 */
   private readonly pluginSettings: PluginSettingRepository;
+  /** 记忆仓库（0.7.2：派发指令注入相关偏好/事实）。 */
+  readonly memories: MemoryRepository;
 
   constructor(
     private readonly agents: DshAgentAdapter,
@@ -56,10 +59,13 @@ export class AgentController {
   ) {
     this.queue = new ModelQueue(maxConcurrency);
     this.pluginSettings = new PluginSettingRepository(db);
+    this.memories = new MemoryRepository(db);
   }
 
-  /** 心跳契约间隔（缺省 5 分钟；须小于 idleStaleMs 否则契约必然违约）。 */
-  private heartbeatIntervalMs(): number {
+  /** 心跳契约间隔（缺省 5 分钟；任务分类命中覆盖表时用分类值；须小于 idleStaleMs 否则契约必然违约）。 */
+  private heartbeatIntervalMs(category?: string | null): number {
+    const overridden = category != null ? readCategoryOverrides(this.pluginSettings)[category]?.heartbeatIntervalMs : undefined;
+    if (typeof overridden === 'number' && Number.isFinite(overridden) && overridden > 0) return overridden;
     const configured = this.pluginSettings.getJson<number>(WATCHDOG_SETTING_KEYS.heartbeatIntervalMs);
     return typeof configured === 'number' && Number.isFinite(configured) && configured > 0 ? configured : 5 * 60 * 1000;
   }
@@ -99,6 +105,15 @@ export class AgentController {
     const project = this.taskManager.projects.byId(task.project_id);
     const workerSession = sessionOverride?.sessionId ?? project?.worker_session_id ?? undefined;
     if (!workerSession) return { dispatched: false, reason: 'no-worker-session', taskId };
+    // 0.7.2 会话退化断路器：项目默认会话对该任务连续 2 次失败 → 拒派建议换会话
+    // （用户显式指定 session_id 的派发是明确决策，不做拦截）
+    if (sessionOverride === undefined) {
+      const history = this.taskManager.runs.byTask(taskId).filter((r) => r.session_id === workerSession);
+      const lastTwo = history.slice(-2);
+      if (lastTwo.length === 2 && lastTwo.every((r) => r.outcome === 'timeout' || r.outcome === 'failed')) {
+        return { dispatched: false, reason: 'session-degenerated', taskId };
+      }
+    }
     if (await this.agents.isBusy(workerSession)) {
       return { dispatched: false, reason: 'busy', taskId };
     }
@@ -106,7 +121,7 @@ export class AgentController {
     try {
       this.taskManager.markDispatched(taskId, workerSession, new Date(Date.now() + DEFAULT_TIMEOUT_MS).toISOString());
       const modelPref = parseModelPref(task.model_pref_json) ?? parseModelPref(project?.model_pref_json);
-      await this.agents.dispatch(workerSession, this.buildInstruction(taskId, task.title, task.description), modelPref);
+      await this.agents.dispatch(workerSession, this.buildInstruction(task), modelPref);
       this.permits.set(taskId, permit);
       return { dispatched: true, reason: 'ok', taskId };
     } catch (error) {
@@ -188,20 +203,42 @@ export class AgentController {
     return this.permits.size;
   }
 
-  /** 组装任务指令文本（含 worker_report 汇报要求与心跳契约——FB-11 协议层强制）。 */
-  private buildInstruction(taskId: string, title: string, description: string): string {
-    const heartbeatMinutes = Math.max(1, Math.round(this.heartbeatIntervalMs() / 60000));
+  /** 组装任务指令文本（分类标注 + 验收契约 + 心跳契约 + 相关记忆注入，0.7.2）。 */
+  private buildInstruction(task: { id: string; title: string; description: string; category: string | null; acceptance: string | null }): string {
+    const heartbeatMinutes = Math.max(1, Math.round(this.heartbeatIntervalMs(task.category) / 60000));
+    const memories = this.relevantMemories(task.title, task.description);
     return [
-      `【任务派发】${taskId}`,
-      `标题：${title}`,
-      description ? `说明：${description}` : '',
+      `【任务派发】${task.id}${task.category !== null ? `（分类：${task.category}）` : ''}`,
+      `标题：${task.title}`,
+      task.description !== '' ? `说明：${task.description}` : '',
+      ...(task.acceptance !== null
+        ? [`验收条件：${task.acceptance}——完成时须在 worker_report 的 evidence 字段附佐证（结果文件绝对路径或关键输出摘要），系统将据此核验`]
+        : []),
       '',
       '执行要求：完成或状态变化时调用 worker_report 工具汇报（workspace_id/task_id/status/progress/summary），',
-      `其中 task_id 必须为 ${taskId}；任务完成时 status=completed。`,
+      `其中 task_id 必须为 ${task.id}；任务完成时 status=completed。`,
       `心跳契约：执行预计超过 ${heartbeatMinutes} 分钟时，必须每 ${heartbeatMinutes} 分钟调用一次 worker_report（status=running，progress/summary 简述当前进展）；`,
       '超时未收到心跳将触发系统催告并升级通知管理端。',
+      ...(memories.length > 0 ? ['', '相关记忆（用户偏好与既定事实，执行时遵守）：', ...memories.map((m) => `- ${m}`)] : []),
     ]
       .filter((line) => line !== '')
       .join('\n');
+  }
+
+  /**
+   * 相关记忆筛选（0.7.2 轻量版）：取 preference/fact 类中与标题/描述共享任意 2-gram 的前 3 条。
+   * 不做向量检索——个人规模记忆量下关键词交集足够，避免引入嵌入依赖。
+   */
+  private relevantMemories(title: string, description: string): string[] {
+    const text = `${title} ${description}`;
+    const grams: string[] = [];
+    for (let i = 0; i + 2 <= text.length; i += 1) grams.push(text.slice(i, i + 2));
+    if (grams.length === 0) return [];
+    return this.memories
+      .list()
+      .filter((m) => m.category === 'preference' || m.category === 'fact')
+      .filter((m) => grams.some((g) => m.content.includes(g)))
+      .slice(0, 3)
+      .map((m) => `(${m.category}) ${m.content}`);
   }
 }

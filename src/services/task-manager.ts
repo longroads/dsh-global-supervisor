@@ -59,6 +59,10 @@ export interface CreateTaskInput {
   dueAt?: string;
   /** 来源事件 ID（存在且带 thread_id 时自动订阅其 Thread，供事件直通） */
   sourceEventId?: string;
+  /** 任务分类（0.7.2：决定差异化跟进节奏；inspection/investigation/development/maintenance/daily 或自定义） */
+  category?: string;
+  /** 验收条件（0.7.2 派发契约：注入派发指令，Worker 完成时对照并附证据） */
+  acceptance?: string;
 }
 
 /** TaskManager 服务（纯逻辑，DSH 交互由上层 AgentController 负责）。 */
@@ -101,6 +105,8 @@ export class TaskManager {
         dueAt: input.dueAt,
         sourceEventId: input.sourceEventId,
         channelRef: channelRef ?? undefined,
+        category: input.category,
+        acceptance: input.acceptance,
       });
       for (const dep of input.dependsOn ?? []) {
         this.tasks.addDependency(id, dep);

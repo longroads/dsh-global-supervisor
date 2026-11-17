@@ -44,11 +44,13 @@ export class TaskRepository {
     scheduleBindingId?: string;
     sourceEventId?: string;
     channelRef?: string;
+    category?: string;
+    acceptance?: string;
   }): void {
     this.db
       .prepare(
-        `INSERT INTO tasks(id, project_id, parent_task_id, title, description, priority, status, schedule_binding_id, source_event_id, channel_ref, max_retries, due_at, created_at, updated_at)
-         VALUES(?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO tasks(id, project_id, parent_task_id, title, description, priority, status, schedule_binding_id, source_event_id, channel_ref, max_retries, due_at, category, acceptance, created_at, updated_at)
+         VALUES(?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         input.id,
@@ -62,6 +64,8 @@ export class TaskRepository {
         input.channelRef ?? null,
         input.maxRetries ?? 2,
         input.dueAt ?? null,
+        input.category ?? null,
+        input.acceptance ?? null,
         now(),
         now(),
       );
@@ -71,13 +75,20 @@ export class TaskRepository {
     return this.db.prepare('SELECT * FROM tasks WHERE id = ?').get(id) as TaskRow | undefined;
   }
 
-  list(filter: { projectId?: string; status?: TaskStatus } = {}): TaskRow[] {
+  list(filter: { projectId?: string; status?: TaskStatus; category?: string } = {}): TaskRow[] {
     const conditions: string[] = [];
     const params: (string | number)[] = [];
     if (filter.projectId !== undefined) { conditions.push('project_id = ?'); params.push(filter.projectId); }
     if (filter.status !== undefined) { conditions.push('status = ?'); params.push(filter.status); }
+    if (filter.category !== undefined) { conditions.push('category = ?'); params.push(filter.category); }
     const where = conditions.length > 0 ? ` WHERE ${conditions.join(' AND ')}` : '';
     return this.db.prepare(`SELECT * FROM tasks${where} ORDER BY created_at DESC`).all(...params) as unknown as TaskRow[];
+  }
+
+  /** 写完成验证结果（0.7.2 轻验证：1 通过 / 0 未过 / null 清除）。 */
+  setVerified(id: string, verified: 0 | 1): boolean {
+    const result = this.db.prepare('UPDATE tasks SET verified = ?, updated_at = ? WHERE id = ?').run(verified, now(), id);
+    return result.changes > 0;
   }
 
   /** 更新状态（updated_at 盖章）。转换合法性由 TaskManager 校验。 */

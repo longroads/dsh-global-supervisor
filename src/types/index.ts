@@ -102,6 +102,24 @@ export interface TaskRow {
   timeout_at: string | null;
   due_at: string | null;
   last_report_at: string | null;
+  /** 任务分类（0.7.2：决定差异化跟进节奏；NULL = 未分类走全局缺省）。 */
+  category: string | null;
+  /** 派发契约的验收条件（0.7.2：注入派发指令，完成汇报时对照）。 */
+  acceptance: string | null;
+  /** 完成验证结果（0.7.2：1 = 轻验证通过；0 = 验证未过；NULL = 未验证/不适用）。 */
+  verified: number | null;
+  created_at: string;
+  updated_at: string;
+}
+
+/** memories 表行（0.7.2 记忆地基）。 */
+export interface MemoryRow {
+  id: string;
+  category: 'preference' | 'fact' | 'routine' | 'commitment';
+  content: string;
+  source: string;
+  /** commitment 类记忆的闭环状态（1 = 已闭环）。 */
+  closed: number;
   created_at: string;
   updated_at: string;
 }

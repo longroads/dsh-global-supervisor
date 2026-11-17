@@ -452,6 +452,25 @@ describe('supervisor 工具权限与任务流', () => {
     expect(stack.taskManager.audit.byAction('session.create')).toHaveLength(1);
   });
 
+  it('0.7.2 会话退化断路器：同会话对该任务连续 2 次失败 → 拒派并建议换会话；fresh_session 显式指定不受拦截', async () => {
+    const stack = await buildStack();
+    const assign = buildSupervisorTools(stack).find((t) => t.name === 'supervisor_task_assign') as ToolDefinition;
+    const task = stack.taskManager.createTask({ projectId: 'proj-1', title: 'T' }, { sessionId: ROUTER_SESSION, role: 'router' });
+    // 直接构造同会话两次连续失败 run（保持任务 pending，走 assign 的正常入队路径）；
+    // retry_count 同步置 2，使后续派发的 attempt_no（retry_count+1=3）不与造的历史撞 UNIQUE
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+      const runId = stack.taskManager.runs.start({ taskId: task.id, sessionId: WORKER_SESSION, attemptNo: attempt });
+      stack.taskManager.runs.finish(runId, attempt === 1 ? 'timeout' : 'failed', { errorMessage: 'simulated' });
+    }
+    stack.db.prepare('UPDATE tasks SET retry_count = 2 WHERE id = ?').run(task.id);
+    const blocked = await assign.execute({ task_id: task.id }, execOf(ROUTER_SESSION));
+    expect((blocked as { ok: boolean }).ok).toBe(false);
+    expect((blocked as { error: string }).error).toContain('疑似退化');
+    // 显式 fresh_session 不受拦截（用户明确决策换会话）
+    const fresh = await assign.execute({ task_id: task.id, fresh_session: true }, execOf(ROUTER_SESSION));
+    expect((fresh as { ok: boolean }).ok).toBe(true);
+  });
+
   it('supervisor_session_create：受管 workspace 下创建新会话并返回使用提示（FB-10①）', async () => {
     const stack = await buildStack();
     const tools = buildSupervisorTools(stack);
@@ -642,7 +661,42 @@ describe('supervisor_watchdog_config 与纳管引导（FB-2/FB-8）', () => {
       scan_interval_ms: 300_000,
       heartbeat_interval_ms: 300_000,
       progress_push_interval_ms: 900_000,
+      category_overrides: {},
     });
+  });
+
+  it('0.7.2 分类与记忆：task_create 带 category/acceptance 落库；memory_save/list/闭环；分类覆盖写入', async () => {
+    const stack = await buildStack();
+    const create = findTool(stack, 'supervisor_task_create');
+    const created = await create.execute({ workspace_id: 'ws-1', title: '内存四轮压测', category: 'investigation', acceptance: '报告写入 E:\\tmp\\mem-report.md' }, execOf(ROUTER_SESSION));
+    const task = (created as { task: { id: string; category: string | null; acceptance: string | null } }).task;
+    expect(task.category).toBe('investigation');
+    expect(task.acceptance).toContain('mem-report');
+
+    // 分类级覆盖写入并生效（派发指令的心跳间隔随之变化）
+    const config = findTool(stack, 'supervisor_watchdog_config');
+    const overridden = await config.execute({ category_overrides: { investigation: { heartbeatIntervalMs: 120_000 } } }, execOf(ROUTER_SESSION));
+    expect((overridden as { category_overrides: Record<string, unknown> }).category_overrides).toEqual({ investigation: { heartbeatIntervalMs: 120_000 } });
+    stack.taskManager.enqueue(task.id, { sessionId: ROUTER_SESSION, role: 'router' });
+    await stack.agentController.dispatchTask(task.id);
+    const instruction = agentSpies.followups.find((f) => f.includes('【任务派发】'));
+    expect(instruction).toContain('分类：investigation');
+    expect(instruction).toContain('验收条件');
+    expect(instruction).toContain('心跳契约：执行预计超过 2 分钟');
+
+    // 记忆：登记承诺 → 简报可见 → 闭环后消失
+    const memorySave = findTool(stack, 'supervisor_memory_save');
+    const saved = await memorySave.execute({ category: 'commitment', content: '用户明天中午前去确认主板报价' }, execOf(ROUTER_SESSION));
+    const memory = (saved as { memory: { id: string; category: string } }).memory;
+    expect(memory.category).toBe('commitment');
+    const briefing = await findTool(stack, 'supervisor_briefing').execute({}, execOf(ROUTER_SESSION));
+    const loops = (briefing as { open_loops: Array<{ id: string }> }).open_loops;
+    expect(loops.some((l) => l.id === memory.id)).toBe(true);
+    expect((briefing as { running: unknown[] }).running.length).toBe(1);
+    const closed = await memorySave.execute({ category: 'commitment', content: '', memory_id: memory.id, close: true }, execOf(ROUTER_SESSION));
+    expect((closed as { ok: boolean }).ok).toBe(true);
+    const briefingAfter = await findTool(stack, 'supervisor_briefing').execute({}, execOf(ROUTER_SESSION));
+    expect((briefingAfter as { open_loops: unknown[] }).open_loops).toHaveLength(0);
   });
 
   it('心跳契约参数：heartbeat KV 落库；progress_push 显式 0 合法（关闭）', async () => {

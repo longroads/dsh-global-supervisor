@@ -42,7 +42,21 @@ export const WATCHDOG_SETTING_KEYS = {
   scanIntervalMs: 'watchdog.scanIntervalMs',
   heartbeatIntervalMs: 'watchdog.heartbeatIntervalMs',
   progressPushIntervalMs: 'watchdog.progressPushIntervalMs',
+  categoryOverrides: 'watchdog.categoryOverrides',
 } as const;
+
+/** 分类级节奏覆盖项（0.7.2：按任务分类差异化跟进；缺省键回落全局值）。 */
+export interface CategoryOverride {
+  startingTimeoutMs?: number;
+  idleStaleMs?: number;
+  heartbeatIntervalMs?: number;
+}
+
+/** 读取分类覆盖表（畸形值整体忽略——覆盖配置坏行不阻断全局节奏）。 */
+export function readCategoryOverrides(settings: WatchdogSettingSource | undefined): Record<string, CategoryOverride> {
+  const raw = settings?.getJson<Record<string, CategoryOverride>>(WATCHDOG_SETTING_KEYS.categoryOverrides);
+  return typeof raw === 'object' && raw !== null && !Array.isArray(raw) ? raw : {};
+}
 
 /** 增强检查依赖与缺省阈值。 */
 export interface WatchdogOptions {
@@ -177,9 +191,9 @@ export class ProjectMonitor {
     }
     for (const task of this.taskManager.tasks.list({ status: 'running' })) {
       if (task.last_report_at === null) {
-        await this.scanStarting(task.id, task.assigned_session_id, result);
+        await this.scanStarting(task.id, task.assigned_session_id, task.category, result);
       } else {
-        await this.scanWorkerLiveness(task.id, task.assigned_session_id, task.last_report_at, result);
+        await this.scanWorkerLiveness(task.id, task.assigned_session_id, task.last_report_at, task.category, result);
       }
     }
     for (const task of this.taskManager.tasks.list({ status: 'need_human' })) {
@@ -211,12 +225,12 @@ export class ProjectMonitor {
     }
   }
 
-  /** starting 分类：启动窗口内无汇报 → 判 failed 并重试；Worker Agent 仍在执行则宽限（FB-2）。 */
-  private async scanStarting(taskId: string, assignedSessionId: string | null, result: WatchdogScan): Promise<void> {
+  /** starting 分类：启动窗口内无汇报 → 判 failed 并重试；Worker Agent 仍在执行则宽限（FB-2）；窗口按任务分类覆盖。 */
+  private async scanStarting(taskId: string, assignedSessionId: string | null, category: string | null, result: WatchdogScan): Promise<void> {
     const openRun = this.taskManager.runs.byTask(taskId).find((r) => r.ended_at === null);
     if (!openRun) return;
     const startedAt = Date.parse(openRun.started_at);
-    if (Number.isNaN(startedAt) || Date.now() - startedAt < this.startingTimeoutMs()) return;
+    if (Number.isNaN(startedAt) || Date.now() - startedAt < this.categoryEffectiveMs(category, 'startingTimeoutMs', this.startingTimeoutMs())) return;
     if (assignedSessionId !== null && this.options.agents !== undefined) {
       const agent = await this.options.agents.getAgent(assignedSessionId).catch(() => undefined);
       if (agent?.status === 'running') {
@@ -232,11 +246,12 @@ export class ProjectMonitor {
     }
   }
 
-  /** idle/lost 分类：已汇报任务的 Worker 会话活性（需 agents 适配器，缺省跳过）。 */
-  private async scanWorkerLiveness(taskId: string, assignedSessionId: string | null, lastReportAt: string, result: WatchdogScan): Promise<void> {
+  /** idle/lost 分类：已汇报任务的 Worker 会话活性（需 agents 适配器，缺省跳过）；阈值按任务分类覆盖。 */
+  private async scanWorkerLiveness(taskId: string, assignedSessionId: string | null, lastReportAt: string, category: string | null, result: WatchdogScan): Promise<void> {
     if (this.options.agents === undefined || assignedSessionId === null) return;
+    const idleStale = this.categoryEffectiveMs(category, 'idleStaleMs', this.idleStaleMs());
     const sinceReport = Date.now() - Date.parse(lastReportAt);
-    if (sinceReport < this.idleStaleMs()) {
+    if (sinceReport < idleStale) {
       this.lostSuspects.delete(taskId);
       return;
     }
@@ -245,9 +260,9 @@ export class ProjectMonitor {
       this.lostSuspects.delete(taskId);
       result.idleSuspects.push(taskId);
       // FB-11 两段式：超龄先催告 Worker 立即补心跳（去抖），同时升级告警 Router（info→warning）
-      const nudged = await this.nudgeHeartbeat(taskId, assignedSessionId);
+      const nudged = await this.nudgeHeartbeat(taskId, assignedSessionId, idleStale);
       await this.options.notify?.(
-        `任务 ${taskId} 的 Worker 会话空闲已超 ${Math.round(this.idleStaleMs() / 60000)} 分钟且无汇报${nudged ? '（已催告心跳）' : '（本轮催告去抖中）'}，请核实进展`,
+        `任务 ${taskId} 的 Worker 会话空闲已超 ${Math.round(idleStale / 60000)} 分钟且无汇报${nudged ? '（已催告心跳）' : '（本轮催告去抖中）'}，请核实进展`,
         'warning',
       );
       return;
@@ -262,16 +277,24 @@ export class ProjectMonitor {
   }
 
   /** 心跳催告（FB-11）：idleStale 窗口内每任务只催一次；steer 失败不记去抖（下轮重试）。 */
-  private async nudgeHeartbeat(taskId: string, assignedSessionId: string): Promise<boolean> {
+  private async nudgeHeartbeat(taskId: string, assignedSessionId: string, idleStaleMs: number): Promise<boolean> {
     const last = this.nudgedAt.get(taskId);
-    if (last !== undefined && Date.now() - last < this.idleStaleMs()) return false;
+    if (last !== undefined && Date.now() - last < idleStaleMs) return false;
     try {
-      await this.agentController.steerTask(taskId, HEARTBEAT_NUDGE(Math.round(this.idleStaleMs() / 60000)), { role: 'system' });
+      await this.agentController.steerTask(taskId, HEARTBEAT_NUDGE(Math.round(idleStaleMs / 60000)), { role: 'system' });
       this.nudgedAt.set(taskId, Date.now());
       return true;
     } catch {
       return false;
     }
+  }
+
+  /** 分类级有效节奏：任务分类命中覆盖表且值为正 → 覆盖值，否则全局值（0.7.2 差异化跟进）。 */
+  private categoryEffectiveMs(category: string | null, key: 'startingTimeoutMs' | 'idleStaleMs' | 'heartbeatIntervalMs', globalValue: number): number {
+    if (category === null) return globalValue;
+    const overrides = readCategoryOverrides(this.options.settings);
+    const value = overrides[category]?.[key];
+    return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : globalValue;
   }
 
   /** 零 LLM 进度快照（FB-12）：running 任务 × 最近汇报 × 会话 Agent 状态，逐任务落事件流水。 */

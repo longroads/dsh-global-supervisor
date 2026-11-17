@@ -163,6 +163,44 @@ describe('worker_report 通知（Phase 4）', () => {
     expect(notices[0]?.message).toContain('【通知】');
     expect(notices[0]?.message).toContain(task.id);
   });
+
+  it('0.7.2 完成轻验证：带验收条件 + evidence 文件（mtime 新于派发）→ verified=1；缺 evidence → verified=0 并告警', async () => {
+    const { stack, notices } = await buildStack();
+    const tool = buildWorkerReportTool(stack);
+    // 证据文件：新建于派发之后（mtime 必然新于 run.started_at）
+    const { mkdtempSync, writeFileSync, rmSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    const dir = mkdtempSync(join(tmpdir(), 'evidence-'));
+    const evidencePath = join(dir, 'report.md');
+    try {
+      const task = stack.taskManager.createTask(
+        { projectId: 'proj-1', title: '压测报告', acceptance: '报告写入结果文件' },
+        { sessionId: ROUTER_SESSION, role: 'router' },
+      );
+      stack.taskManager.enqueue(task.id, { sessionId: ROUTER_SESSION, role: 'router' });
+      stack.taskManager.markDispatched(task.id, WORKER_SESSION, null);
+      writeFileSync(evidencePath, 'report body', 'utf8');
+      await tool.execute(
+        { workspace_id: 'ws-1', task_id: task.id, status: 'completed', progress: 100, summary: '完成', evidence: evidencePath },
+        execOf(WORKER_SESSION),
+      );
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      expect(stack.taskManager.tasks.byId(task.id)?.verified).toBe(1);
+      expect(stack.taskManager.audit.byTarget('task', task.id).some((a) => a.action === 'task.verification')).toBe(true);
+
+      // 无 evidence 的带验收任务 → 未验证 + warning 告警
+      const task2 = stack.taskManager.createTask({ projectId: 'proj-1', title: 'T2', acceptance: '须给出文件' }, { sessionId: ROUTER_SESSION, role: 'router' });
+      stack.taskManager.enqueue(task2.id, { sessionId: ROUTER_SESSION, role: 'router' });
+      stack.taskManager.markDispatched(task2.id, WORKER_SESSION, null);
+      await tool.execute({ workspace_id: 'ws-1', task_id: task2.id, status: 'completed', summary: '完成' }, execOf(WORKER_SESSION));
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      expect(stack.taskManager.tasks.byId(task2.id)?.verified).toBe(0);
+      expect(notices.some((n) => n.message.includes('证据未通过核验'))).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
 
 /** 断言 events 表中指定 type 的事件条数（直查库，机器消费值）。 */

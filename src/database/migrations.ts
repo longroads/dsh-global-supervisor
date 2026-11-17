@@ -227,6 +227,24 @@ export const MIGRATIONS: readonly Migration[] = [
       ALTER TABLE tasks ADD COLUMN model_pref_json TEXT;
     `,
   },
+  {
+    version: 8,
+    name: 'category-contract-memories',
+    up: `
+      ALTER TABLE tasks ADD COLUMN category TEXT;
+      ALTER TABLE tasks ADD COLUMN acceptance TEXT;
+      ALTER TABLE tasks ADD COLUMN verified INTEGER;
+      CREATE TABLE memories (
+        id TEXT PRIMARY KEY,
+        category TEXT NOT NULL CHECK (category IN ('preference', 'fact', 'routine', 'commitment')),
+        content TEXT NOT NULL,
+        source TEXT NOT NULL DEFAULT 'router',
+        closed INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+    `,
+  },
 ];
 
 /** 迁移执行器：按 version 升序应用未执行的迁移，每条独立事务。 */

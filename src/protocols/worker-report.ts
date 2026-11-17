@@ -19,6 +19,8 @@ export interface WorkerReport {
   blockers: string[];
   needHuman: boolean;
   suggestedActions: string[];
+  /** 完成证据（0.7.2 派发契约）：文件绝对路径或输出摘要，completed 汇报时用于轻验证。 */
+  evidence?: string;
 }
 
 /** 校验失败（机器可消费的稳定错误）。 */
@@ -45,7 +47,7 @@ export function parseWorkerReport(input: unknown): WorkerReport {
   if (!isObject(input)) {
     throw new ReportValidationError(['载荷必须是对象']);
   }
-  const allowed = new Set(['workspace_id', 'task_id', 'status', 'progress', 'summary', 'blockers', 'need_human', 'suggested_actions']);
+  const allowed = new Set(['workspace_id', 'task_id', 'status', 'progress', 'summary', 'blockers', 'need_human', 'suggested_actions', 'evidence']);
   for (const key of Object.keys(input)) {
     if (!allowed.has(key)) {
       issues.push(`未知字段：${key}`);
@@ -83,6 +85,10 @@ export function parseWorkerReport(input: unknown): WorkerReport {
   if (!isStringArray(suggested)) {
     issues.push('suggested_actions 必须是字符串数组');
   }
+  const evidence = input['evidence'];
+  if (evidence !== undefined && typeof evidence !== 'string') {
+    issues.push('evidence 必须是字符串');
+  }
   if (issues.length > 0) {
     throw new ReportValidationError(issues);
   }
@@ -96,6 +102,7 @@ export function parseWorkerReport(input: unknown): WorkerReport {
     blockers: blockers as string[],
     needHuman: needHuman as boolean,
     suggestedActions: suggested as string[],
+    evidence: evidence as string | undefined,
   };
 }
 
