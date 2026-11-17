@@ -21,6 +21,7 @@ import { EventRouter } from '../../src/services/event-router.js';
 import { DshLlmCatalogAdapter } from '../../src/adapters/dsh-llm-catalog.js';
 import { RoutingRuleRepository } from '../../src/database/repository/routing-rule-repository.js';
 import { ThreadSubscriptionRepository } from '../../src/database/repository/thread-subscription-repository.js';
+import { PluginSettingRepository } from '../../src/database/repository/plugin-setting-repository.js';
 import type { SupervisorStack } from '../../src/runtime.js';
 import { isGuardDenied, makeTool } from '../../src/tools/toolkit.js';
 import { parseWorkerReport } from '../../src/protocols/worker-report.js';
@@ -57,7 +58,7 @@ afterEach(() => {
 });
 
 /** 手工组装服务栈（内存库 + fake ctx；workspaceRegistry/agents/llm 提供假实现；projcache 注入 tmp 目录）。 */
-async function buildStack(): Promise<SupervisorStack> {
+async function buildStack(seedProject = true): Promise<SupervisorStack> {
   const db = await openDatabase(':memory:');
   agentSpies.selects.length = 0;
   agentSpies.followups.length = 0;
@@ -100,17 +101,21 @@ async function buildStack(): Promise<SupervisorStack> {
   } as unknown as Context;
   const agentAdapter = new DshAgentAdapter(fakeCtx);
   const taskManager = new TaskManager(db);
-  taskManager.projects.create({ id: 'proj-1', workspaceId: 'ws-1', name: 'P1', workerSessionId: WORKER_SESSION });
+  if (seedProject) {
+    taskManager.projects.create({ id: 'proj-1', workspaceId: 'ws-1', name: 'P1', workerSessionId: WORKER_SESSION });
+  }
+  const agentController = new AgentController(agentAdapter, taskManager, db);
+  const monitor = new ProjectMonitor(taskManager, agentController, undefined, { settings: new PluginSettingRepository(db) });
   return {
     db,
     dataDir: ':memory:',
     taskManager,
     workspaceManager: new WorkspaceManager(new DshWorkspaceAdapter(fakeCtx), db),
-    agentController: new AgentController(agentAdapter, taskManager, db),
+    agentController,
     scheduler: new SchedulerService(new DshScheduleAdapter(fakeCtx), db),
     eventManager: new EventManager(db),
     sessionAdapter: new DshSessionAdapter(fakeCtx, projcacheDir),
-    monitor: new ProjectMonitor(taskManager),
+    monitor,
     notifier: new NotifierService(
       new SessionDirectNotifier(agentAdapter, () => ROUTER_SESSION),
       { notify: async () => false },
@@ -555,5 +560,52 @@ describe('worker_report 工具全链路', () => {
     );
     expect((outcome as { reason: string }).reason).toBe('wrong-session');
     expect(stack.taskManager.tasks.byId(taskId)?.status).toBe('running');
+  });
+});
+
+describe('supervisor_watchdog_config 与纳管引导（FB-2/FB-8）', () => {
+  function findTool(stack: SupervisorStack, name: string): ToolDefinition {
+    const tool = buildSupervisorTools(stack).find((t) => t.name === name);
+    if (!tool) throw new Error(`工具未注册：${name}`);
+    return tool;
+  }
+
+  it('无参调用返回当前缺省配置', async () => {
+    const stack = await buildStack();
+    const result = await findTool(stack, 'supervisor_watchdog_config').execute({}, execOf(ROUTER_SESSION));
+    expect(result).toEqual({ ok: true, starting_timeout_ms: 600_000, approval_timeout_ms: 60_000, idle_stale_ms: 600_000, scan_interval_ms: 1_800_000 });
+  });
+
+  it('设置启动窗口：KV 落库且再次查询返回新值；审计留痕', async () => {
+    const stack = await buildStack();
+    const tool = findTool(stack, 'supervisor_watchdog_config');
+    const updated = await tool.execute({ starting_timeout_ms: 120_000 }, execOf(ROUTER_SESSION));
+    expect((updated as { starting_timeout_ms: number }).starting_timeout_ms).toBe(120_000);
+    const again = await tool.execute({}, execOf(ROUTER_SESSION));
+    expect((again as { starting_timeout_ms: number }).starting_timeout_ms).toBe(120_000);
+    expect((again as { approval_timeout_ms: number }).approval_timeout_ms).toBe(60_000);
+    expect(stack.taskManager.audit.byAction('watchdog.config.set')).toHaveLength(1);
+  });
+
+  it('设置扫描间隔：KV 落库且 effectiveConfig 反映（下轮扫描后重排定时器）', async () => {
+    const stack = await buildStack();
+    const tool = findTool(stack, 'supervisor_watchdog_config');
+    const updated = await tool.execute({ scan_interval_ms: 3_600_000 }, execOf(ROUTER_SESSION));
+    expect((updated as { scan_interval_ms: number }).scan_interval_ms).toBe(3_600_000);
+    expect(stack.monitor.effectiveConfig().scanIntervalMs).toBe(3_600_000);
+  });
+
+  it('纳管首个项目：返回值含巡检引导（FB-8）', async () => {
+    const stack = await buildStack(false);
+    const result = await findTool(stack, 'supervisor_workspace_adopt').execute({ workspace_id: 'ws-1' }, execOf(ROUTER_SESSION));
+    expect((result as { ok: boolean }).ok).toBe(true);
+    expect((result as { guidance: string }).guidance).toContain('supervisor_schedule_set');
+  });
+
+  it('重复纳管（非首项目）：无引导字段', async () => {
+    const stack = await buildStack();
+    const result = await findTool(stack, 'supervisor_workspace_adopt').execute({ workspace_id: 'ws-1' }, execOf(ROUTER_SESSION));
+    expect((result as { ok: boolean }).ok).toBe(true);
+    expect((result as { guidance?: string }).guidance).toBeUndefined();
   });
 });

@@ -19,11 +19,11 @@ function futureIso(): string {
   return new Date(Date.now() + 30 * 60_000).toISOString();
 }
 
-/** fake agents 服务：agentPresent=false 时 get 返回 undefined（会话冷/Agent 不存在）。 */
-function fakeAgentService(agentPresent: boolean) {
+/** fake agents 服务：agentPresent=false 时 get 返回 undefined（会话冷/Agent 不存在）；status 可配置（宽限测试）。 */
+function fakeAgentService(agentPresent: boolean, status: 'idle' | 'running' = 'idle') {
   const agent = {
     id: WORKER,
-    status: 'idle' as const,
+    status,
     options: {},
     followup: () => undefined,
     steer: () => undefined,
@@ -42,9 +42,18 @@ interface Notice {
   severity: string;
 }
 
-async function setup(monitorOptions: WatchdogOptions = {}, agentPresent = false): Promise<{ monitor: ProjectMonitor; manager: TaskManager; controller: AgentController; db: Awaited<ReturnType<typeof openDatabase>> }> {
+/** KV 配置替身（Map 支撑的 WatchdogSettingSource）。 */
+function fakeSettings(initial: Record<string, number> = {}) {
+  const store = new Map<string, number>(Object.entries(initial));
+  return {
+    getJson: <T,>(key: string): T | undefined => store.get(key) as T | undefined,
+    set: (key: string, value: number) => store.set(key, value),
+  };
+}
+
+async function setup(monitorOptions: WatchdogOptions = {}, agentPresent = false, agentStatus: 'idle' | 'running' = 'idle'): Promise<{ monitor: ProjectMonitor; manager: TaskManager; controller: AgentController; db: Awaited<ReturnType<typeof openDatabase>> }> {
   const db = await openDatabase(':memory:');
-  const fakeCtx = { get: (name: string) => (name === 'agents' ? fakeAgentService(agentPresent) : {}) } as unknown as Context;
+  const fakeCtx = { get: (name: string) => (name === 'agents' ? fakeAgentService(agentPresent, agentStatus) : {}) } as unknown as Context;
   const manager = new TaskManager(db);
   manager.projects.create({ id: 'proj-1', workspaceId: 'ws-1', name: 'P1', workerSessionId: WORKER });
   const adapter = new DshAgentAdapter(fakeCtx);
@@ -197,5 +206,80 @@ describe('ProjectMonitor 四分类增强（Phase 5-C）', () => {
     expect(second.lost).toEqual([taskId]);
     expect(notified).toHaveLength(1);
     expect(notified[0]?.severity).toBe('critical');
+  });
+});
+
+describe('ProjectMonitor 看门狗修复（FB-2/FB-4/FB-7）', () => {
+  it('活跃宽限：启动窗口已过但 Worker Agent 仍在执行 → 不判死（startupGrace），交执行超时兜底', async () => {
+    const { monitor, manager, db } = await setup({ startingTimeoutMs: 1_000 }, true, 'running');
+    const taskId = runningTask(manager, futureIso());
+    db.prepare('UPDATE task_runs SET started_at = ? WHERE task_id = ?').run(pastIso(), taskId);
+    const scan = await monitor.scanOnce();
+    expect(scan.startupGrace).toEqual([taskId]);
+    expect(scan.startupExpired).toEqual([]);
+    expect(manager.tasks.byId(taskId)?.status).toBe('running');
+    db.close();
+  });
+
+  it('KV 配置覆盖缺省：watchdog.startingTimeoutMs 动态生效（下轮扫描无需重建）', async () => {
+    const settings = fakeSettings({ 'watchdog.startingTimeoutMs': 60 * 60 * 1000 });
+    const { monitor, manager, db } = await setup({ startingTimeoutMs: 1_000, settings });
+    const taskId = runningTask(manager, futureIso());
+    db.prepare('UPDATE task_runs SET started_at = ? WHERE task_id = ?').run(pastIso(), taskId);
+    const scan = await monitor.scanOnce();
+    expect(scan.startupExpired).toEqual([]);
+    expect(manager.tasks.byId(taskId)?.status).toBe('running');
+    // 改小 KV 值 → 下一轮判定生效
+    settings.set('watchdog.startingTimeoutMs', 1_000);
+    const second = await monitor.scanOnce();
+    expect(second.startupExpired).toEqual([taskId]);
+    db.close();
+  });
+
+  it('周期超时与 restart-recovery 解耦（FB-7）：scanOnce 不再写 task.restart-recovery 事件，审计为 task.timeout', async () => {
+    const { monitor, manager, db } = await setup();
+    const taskId = runningTask(manager, pastIso());
+    const scan = await monitor.scanOnce();
+    expect(scan.expired).toEqual([taskId]);
+    const events = db.prepare("SELECT * FROM events WHERE type = 'task.restart-recovery'").all();
+    expect(events).toHaveLength(0);
+    expect(manager.audit.byTarget('task', taskId).some((a) => a.action === 'task.timeout')).toBe(true);
+    db.close();
+  });
+
+  it('FB-7 复现：任务 cancel 后继续扫描，不再出现 restart-recovery 事件（反馈实录场景）', async () => {
+    const { monitor, manager, db } = await setup();
+    const taskId = runningTask(manager, futureIso());
+    manager.cancel(taskId, { sessionId: 'session-router', role: 'router' });
+    await monitor.scanOnce();
+    await monitor.scanOnce();
+    const events = db.prepare("SELECT * FROM events WHERE type = 'task.restart-recovery'").all();
+    expect(events).toHaveLength(0);
+    expect(manager.tasks.byId(taskId)?.status).toBe('canceled');
+    db.close();
+  });
+
+  it('判死重试发 warning 通知、重试预算耗尽发 critical 通知（FB-4）', async () => {
+    const notified: Notice[] = [];
+    const { monitor, manager } = await setup({
+      startingTimeoutMs: 1_000,
+      notify: async (message, severity) => {
+        notified.push({ message, severity });
+        return true;
+      },
+    });
+    const taskId = runningTask(manager, pastIso());
+    await monitor.scanOnce();
+    expect(notified).toHaveLength(1);
+    expect(notified[0]?.severity).toBe('warning');
+    expect(notified[0]?.message).toContain(taskId);
+    // 重试 → 再派发 → 再超时 → 预算耗尽（max_retries 默认 2）
+    manager.markDispatched(taskId, WORKER, pastIso());
+    await monitor.scanOnce();
+    manager.markDispatched(taskId, WORKER, pastIso());
+    await monitor.scanOnce();
+    const criticals = notified.filter((n) => n.severity === 'critical');
+    expect(criticals).toHaveLength(1);
+    expect(criticals[0]?.message).toContain(taskId);
   });
 });

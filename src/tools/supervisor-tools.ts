@@ -5,7 +5,9 @@
  */
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools';
 import type { EventRoutingAction } from '../database/repository/event-routing-rule-repository.js';
+import { PluginSettingRepository } from '../database/repository/plugin-setting-repository.js';
 import type { SupervisorStack } from '../runtime.js';
+import { WATCHDOG_SETTING_KEYS } from '../services/project-monitor.js';
 import { asRecord, intArg, makeTool, optionalStringArg, stringArg } from './toolkit.js';
 
 /** Router 守卫：经 RouterIdentity 动态判定（运行时认领制，见 services/router-identity.ts）。 */
@@ -87,11 +89,16 @@ export function buildSupervisorTools(stack: SupervisorStack): ToolDefinition[] {
     handler: async (args) => {
       const record = asRecord(args);
       try {
+        const wasFirstProject = stack.taskManager.projects.list().length === 0;
         const project = await stack.workspaceManager.adoptWorkspace(stringArg(record, 'workspace_id'), {
           priority: intArg(record, 'priority', 3, 0, 9),
           description: stringArg(record, 'description'),
         });
-        return { ok: true, project };
+        // FB-8：纳管首个项目后引导设置巡检节奏（通知链路的定时兜底）
+        const guidance = wasFirstProject
+          ? '已纳管首个项目——建议：(1) supervisor_workspace_update 绑定 Worker 会话；(2) supervisor_schedule_set 设置巡检节奏（如 daily 快速巡检），定时巡检是任务通知的兜底通道'
+          : undefined;
+        return { ok: true, project, ...(guidance !== undefined ? { guidance } : {}) };
       } catch (error) {
         return { ok: false, error: error instanceof Error ? error.message : String(error) };
       }
@@ -612,6 +619,53 @@ export function buildSupervisorTools(stack: SupervisorStack): ToolDefinition[] {
         return { ok: false, error: 'llm 目录不可达（dsh-llm 服务未就绪）——降级：supervisor_model_set 仍可直填 provider/model（catalog_checked 将为 false）' };
       }
       return { ok: true, providers: catalog };
+    },
+  }));
+
+  tools.push(makeTool({
+    name: 'supervisor_watchdog_config',
+    description: '查看或设置看门狗配置（毫秒，超时项下轮扫描生效、间隔下轮扫描后重排）：starting_timeout_ms 启动窗口（派发后无汇报判死前等待，默认 600000；Worker Agent 活跃时自动宽限）、approval_timeout_ms 人工决策升级窗口（默认 60000）、idle_stale_ms Worker 空闲阈值（默认 600000）、scan_interval_ms 扫描间隔（默认 1800000 即 30 分钟）。不传参数返回当前值',
+    parameters: OBJ({
+      starting_timeout_ms: { type: 'integer', description: '启动窗口毫秒（1000-86400000）' },
+      approval_timeout_ms: { type: 'integer', description: 'need_human 升级窗口毫秒（1000-86400000）' },
+      idle_stale_ms: { type: 'integer', description: 'Worker 空闲阈值毫秒（1000-86400000）' },
+      scan_interval_ms: { type: 'integer', description: '扫描间隔毫秒（60000-86400000）' },
+    }),
+    resultSchema: RESULT,
+    guard, guardDeniedMessage: DENIED,
+    handler: async (args, ctx) => {
+      const record = asRecord(args);
+      const settings = new PluginSettingRepository(stack.db);
+      const clamp = (value: unknown, min = 1_000): number | undefined => {
+        if (typeof value !== 'number' || !Number.isInteger(value)) return undefined;
+        return Math.min(86_400_000, Math.max(min, value));
+      };
+      const starting = clamp(record['starting_timeout_ms']);
+      const approval = clamp(record['approval_timeout_ms']);
+      const idle = clamp(record['idle_stale_ms']);
+      const scan = clamp(record['scan_interval_ms'], 60_000);
+      if (starting !== undefined) settings.setJson(WATCHDOG_SETTING_KEYS.startingTimeoutMs, starting);
+      if (approval !== undefined) settings.setJson(WATCHDOG_SETTING_KEYS.approvalTimeoutMs, approval);
+      if (idle !== undefined) settings.setJson(WATCHDOG_SETTING_KEYS.idleStaleMs, idle);
+      if (scan !== undefined) settings.setJson(WATCHDOG_SETTING_KEYS.scanIntervalMs, scan);
+      if (starting !== undefined || approval !== undefined || idle !== undefined || scan !== undefined) {
+        stack.taskManager.audit.log({
+          actorSessionId: ctx.callerSessionId,
+          actorRole: 'router',
+          action: 'watchdog.config.set',
+          targetType: 'watchdogConfig',
+          targetId: 'watchdog',
+          detailJson: JSON.stringify({ startingTimeoutMs: starting ?? null, approvalTimeoutMs: approval ?? null, idleStaleMs: idle ?? null, scanIntervalMs: scan ?? null }),
+        });
+      }
+      const current = stack.monitor.effectiveConfig();
+      return {
+        ok: true,
+        starting_timeout_ms: starting ?? current.startingTimeoutMs,
+        approval_timeout_ms: approval ?? current.approvalTimeoutMs,
+        idle_stale_ms: idle ?? current.idleStaleMs,
+        scan_interval_ms: scan ?? current.scanIntervalMs,
+      };
     },
   }));
 
