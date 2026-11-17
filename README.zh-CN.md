@@ -14,7 +14,7 @@ DSH（DeepSeek Harness）全局监督插件：跨 Workspace 的项目管理、�
 - **事件驱动**：Webhook 接入外部事件 + 五种 cordis 内部事件订阅，统一流水去重；observe/auto 双模式规则路由（转述/静音/直投 Worker），多条事件自动合批为一条 Router 通知。
 - **Thread 直通**：从事件创建的任务自动订阅来源 Thread，同 Thread 后续事件直投该任务 Worker，不经 Router。
 - **上下文召回**：`supervisor_recall` 按事件/任务 ID 一跳召回关联上下文（同 Thread 事件、订阅任务、Worker 汇报、执行历史）。
-- **看门狗四分类**：启动超时重试（默认 10 分钟窗口 + Worker 活跃宽限）/ 执行超时重试 / 需人工超时升级 / Worker 空闲失联检测，默认每 30 分钟自动扫描（扫描间隔同样可经 `supervisor_watchdog_config` 运行时调整）；判死与重试必通知 Router。
+- **看门狗四分类**：启动超时重试（默认 10 分钟窗口 + Worker 活跃宽限）/ 执行超时重试 / 需人工超时升级 / Worker 空闲失联检测，每 5 分钟自动扫描（间隔同样可经 `supervisor_watchdog_config` 运行时调整）；判死与重试必通知 Router。
 - **Router 执行守卫**：Router 会话工具调用指向其他受管 workspace 路径时告警；用户消息命中路由偏好时注入"应派发而非自执行"提示；用户纠正时建议固化路由规则。
 - **IM 推送（可选）**：经 dsh-im 把需人工提醒与完成摘要推到飞书/Telegram 等手机 IM，不可用自动降级 Router 会话。
 - **串行派发**：ModelQueue 默认并发 1，优先级插队不抢占运行中任务，适配本地推理资源。

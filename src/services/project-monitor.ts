@@ -56,8 +56,8 @@ export interface WatchdogOptions {
   settings?: WatchdogSettingSource;
 }
 
-/** 默认扫描间隔：30 分钟（各超时窗口的实际触发时点被扫描周期量化）。 */
-const DEFAULT_INTERVAL_MS = 30 * 60 * 1000;
+/** 默认扫描间隔：5 分钟（可经 watchdog.scanIntervalMs KV 调整；各超时窗口的实际触发时点被扫描周期量化）。 */
+const DEFAULT_INTERVAL_MS = 5 * 60 * 1000;
 const DEFAULT_STARTING_TIMEOUT_MS = 10 * 60 * 1000;
 const DEFAULT_APPROVAL_TIMEOUT_MS = 60 * 1000;
 const DEFAULT_IDLE_STALE_MS = 10 * 60 * 1000;

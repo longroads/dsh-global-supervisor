@@ -624,7 +624,7 @@ export function buildSupervisorTools(stack: SupervisorStack): ToolDefinition[] {
 
   tools.push(makeTool({
     name: 'supervisor_watchdog_config',
-    description: '查看或设置看门狗配置（毫秒，超时项下轮扫描生效、间隔下轮扫描后重排）：starting_timeout_ms 启动窗口（派发后无汇报判死前等待，默认 600000；Worker Agent 活跃时自动宽限）、approval_timeout_ms 人工决策升级窗口（默认 60000）、idle_stale_ms Worker 空闲阈值（默认 600000）、scan_interval_ms 扫描间隔（默认 1800000 即 30 分钟）。不传参数返回当前值',
+    description: '查看或设置看门狗配置（毫秒，超时项下轮扫描生效、间隔下轮扫描后重排）：starting_timeout_ms 启动窗口（派发后无汇报判死前等待，默认 600000；Worker Agent 活跃时自动宽限）、approval_timeout_ms 人工决策升级窗口（默认 60000）、idle_stale_ms Worker 空闲阈值（默认 600000）、scan_interval_ms 扫描间隔（默认 300000 即 5 分钟）。不传参数返回当前值',
     parameters: OBJ({
       starting_timeout_ms: { type: 'integer', description: '启动窗口毫秒（1000-86400000）' },
       approval_timeout_ms: { type: 'integer', description: 'need_human 升级窗口毫秒（1000-86400000）' },

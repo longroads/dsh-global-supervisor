@@ -573,7 +573,7 @@ describe('supervisor_watchdog_config 与纳管引导（FB-2/FB-8）', () => {
   it('无参调用返回当前缺省配置', async () => {
     const stack = await buildStack();
     const result = await findTool(stack, 'supervisor_watchdog_config').execute({}, execOf(ROUTER_SESSION));
-    expect(result).toEqual({ ok: true, starting_timeout_ms: 600_000, approval_timeout_ms: 60_000, idle_stale_ms: 600_000, scan_interval_ms: 1_800_000 });
+    expect(result).toEqual({ ok: true, starting_timeout_ms: 600_000, approval_timeout_ms: 60_000, idle_stale_ms: 600_000, scan_interval_ms: 300_000 });
   });
 
   it('设置启动窗口：KV 落库且再次查询返回新值；审计留痕', async () => {

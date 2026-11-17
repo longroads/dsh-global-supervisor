@@ -14,7 +14,7 @@ A single Router session manages many project workspaces: identify projects, disp
 - **Event-driven** — webhook intake + 5 cordis event subscriptions with a unified dedup pipeline; observe/auto rule routing; multiple events batched into one Router notification.
 - **Thread passthrough** — tasks created from an event auto-subscribe to its thread; follow-up events on the same thread go straight to the assigned worker, bypassing the Router.
 - **Context recall** — `supervisor_recall` pulls related context (thread events, subscriptions, worker reports, run history) in one hop.
-- **Watchdog, 4 classes** — startup-timeout retry (10-min window with live-agent grace, tunable at runtime via `supervisor_watchdog_config`), run-timeout retry, need-human escalation, idle/lost worker detection; scans every 30 minutes by default (also tunable). Judgements and retries always notify the Router.
+- **Watchdog, 4 classes** — startup-timeout retry (10-min window with live-agent grace, tunable at runtime via `supervisor_watchdog_config`), run-timeout retry, need-human escalation, idle/lost worker detection; 5-minute scans by default (interval also tunable). Judgements and retries always notify the Router.
 - **Router execution guard** — flags Router-session tool calls that target other managed workspaces, injects "dispatch instead of self-execute" hints on routing-preference hits, and suggests saving a routing rule when the user corrects the Router.
 - **IM push (optional)** — need-human alerts and completion summaries to Feishu/Telegram etc. via dsh-im, with automatic fallback to the Router session.
 - **Model control** — per-task / per-project model selection and switching; `steer` to inject instructions into a running task.
