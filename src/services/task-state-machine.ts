@@ -4,14 +4,21 @@
  */
 import type { TaskStatus } from '../types/index.js';
 
-/** 合法转换表：from → 允许的 to 集合。completed 与 canceled 为终态。 */
+/**
+ * 合法转换表：from → 允许的 to 集合。completed 与 canceled 为终态。
+ * queued/failed → 终态（completed/need_human/failed）为"迟到汇报收编"专用路径：
+ * watchdog 启动超时误判后，Worker 迟到的终态汇报经 TaskManager 收编直达终态（FB-1）；
+ * 仅在任务非 running 时生效——第二次 run 已开始（running）时不开放，避免误伤新 run。
+ * failed → failed 不在此列（自转换非法）：迟到 failed 汇报收编时状态本就一致，
+ * TaskManager 仅标记汇报已应用，无需状态写入。
+ */
 const ALLOWED_TRANSITIONS: Record<TaskStatus, readonly TaskStatus[]> = {
   pending: ['queued', 'canceled'],
-  queued: ['running', 'canceled'],
+  queued: ['running', 'completed', 'need_human', 'failed', 'canceled'],
   running: ['completed', 'blocked', 'need_human', 'failed', 'canceled'],
   blocked: ['queued', 'canceled'],
   need_human: ['queued', 'canceled'],
-  failed: ['queued', 'canceled'],
+  failed: ['queued', 'completed', 'need_human', 'canceled'],
   completed: [],
   canceled: [],
 };

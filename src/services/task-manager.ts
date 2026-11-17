@@ -27,7 +27,7 @@ export interface Actor {
 /** applyWorkerReport 的结构化结果（机器消费值）。 */
 export interface ReportOutcome {
   accepted: boolean;
-  reason: 'applied' | 'heartbeat' | 'wrong-session' | 'task-missing' | 'invalid-transition';
+  reason: 'applied' | 'heartbeat' | 'wrong-session' | 'task-missing' | 'invalid-transition' | 'adopted';
   taskStatus: TaskStatus | null;
 }
 
@@ -182,9 +182,17 @@ export class TaskManager {
     const target = targetStatusOf(report.status);
     if (target === null) {
       this.reports.markApplied(reportId);
-      return { accepted: true, reason: 'heartbeat', taskStatus: 'running' };
+      return { accepted: true, reason: 'heartbeat', taskStatus: task.status };
     }
     if (task.status !== 'running') {
+      // 迟到终态汇报收编（FB-1）：watchdog 误判判死后任务回到 queued/failed 待重试态，
+      // 此时派发会话发来的终态汇报（completed/need_human/failed）真实有效——收编直达终态，
+      // 取消 pending retry。仅在任务非 running 时生效：第二次 run 已开始（running）时
+      // 迟到汇报属于上一 run，收编会误伤新 run，仍按 invalid-transition 拒收。
+      if ((task.status === 'queued' || task.status === 'failed') && target !== 'blocked') {
+        this.adoptTerminalReport(task, reportId, report, target);
+        return { accepted: true, reason: 'adopted', taskStatus: target };
+      }
       this.audit.log({
         actorSessionId: callerSessionId,
         actorRole: 'worker',
@@ -222,6 +230,82 @@ export class TaskManager {
     return { accepted: true, reason: 'applied', taskStatus: target };
   }
 
+  /**
+   * 重派前收编（FB-3）：检查任务是否存在可收编的迟到终态汇报（applied=0、终态、
+   * 来自派发会话、晚于最近一条 run 的开始时间），存在则应用并返回 true。
+   * AgentController.dispatchTask 在派发前调用，防止"成果已交付仍整任务重跑"。
+   */
+  adoptLateReport(taskId: string, actor: Actor): boolean {
+    const task = this.tasks.byId(taskId);
+    if (!task || task.assigned_session_id === null) return false;
+    if (task.status !== 'queued' && task.status !== 'failed') return false;
+    const latestRun = this.runs.byTask(taskId)[0];
+    if (!latestRun) return false;
+    const row = this.reports.findLatestAdoptable(taskId, task.assigned_session_id, latestRun.started_at);
+    if (!row) return false;
+    let blockers: string[] = [];
+    try {
+      const parsed = JSON.parse(row.blockers_json) as unknown;
+      if (Array.isArray(parsed) && parsed.every((item) => typeof item === 'string')) blockers = parsed;
+    } catch {
+      blockers = [];
+    }
+    const target = targetStatusOf(row.status);
+    if (target === null || target === 'blocked') return false;
+    this.adoptTerminalReport(task, row.id, {
+      workspaceId: '',
+      taskId,
+      status: row.status,
+      progress: row.progress ?? undefined,
+      summary: row.summary ?? undefined,
+      blockers,
+      needHuman: row.need_human === 1,
+      suggestedActions: [],
+    }, target);
+    this.audit.log({
+      actorSessionId: actor.sessionId,
+      actorRole: actor.role,
+      action: 'worker_report.pre-adopted',
+      targetType: 'task',
+      targetId: taskId,
+      detailJson: JSON.stringify({ reportId: row.id, from: task.status, to: target }),
+    });
+    return true;
+  }
+
+  /** 收编事务：直达终态、关闭 open run、标记汇报已应用（历史 run 的 timeout 记录保留不改；from===to 时仅标记应用，不写状态）。 */
+  private adoptTerminalReport(task: TaskRow, reportId: number, report: WorkerReport, target: TaskStatus): void {
+    const statusChanges = task.status !== target;
+    if (statusChanges) {
+      assertTransition(task.status, target);
+    }
+    withTransaction(this.db, () => {
+      if (statusChanges) {
+        this.tasks.updateStatus(report.taskId, target);
+      }
+      const openRun = this.runs.byTask(report.taskId).find((r) => r.ended_at === null);
+      if (openRun) {
+        this.runs.finish(openRun.id, target === 'completed' ? 'completed' : 'failed', {
+          resultSummary: report.summary,
+          errorMessage: report.status === 'failed' ? (report.blockers.join('; ') || 'worker 报告失败') : undefined,
+        });
+      }
+      this.reports.markApplied(reportId);
+      if (target === 'completed') {
+        this.threadSubs.unsubscribeByTask(report.taskId);
+      }
+      this.refreshProjectHealth(task.project_id, target, report.needHuman);
+      this.audit.log({
+        actorSessionId: task.assigned_session_id ?? undefined,
+        actorRole: 'worker',
+        action: 'worker_report.adopted',
+        targetType: 'task',
+        targetId: report.taskId,
+        detailJson: JSON.stringify({ from: task.status, to: target, reportId }),
+      });
+    });
+  }
+
   /** 失败重试：retry_count 未耗尽时 failed → queued。 */
   retry(taskId: string, actor: Actor): TaskRow {
     const task = this.requireTask(taskId);
@@ -251,6 +335,13 @@ export class TaskManager {
       }
       this.audit.log({ actorRole: 'system', action: 'task.startup-timeout', targetType: 'task', targetId: taskId });
     });
+    this.events.ingest({
+      eventId: `watchdog-retry:${taskId}:startup:${Date.now()}`,
+      source: 'internal',
+      type: 'task.watchdog_retry',
+      taskId,
+      payloadJson: JSON.stringify({ origin: 'startup' }),
+    });
     return true;
   }
 
@@ -268,6 +359,36 @@ export class TaskManager {
       this.audit.log({ actorSessionId: actor.sessionId, actorRole: actor.role, action: 'task.cancel', targetType: 'task', targetId: taskId });
     });
     return this.tasks.byId(taskId) as TaskRow;
+  }
+
+  /**
+   * 周期超时判定（看门狗专用，FB-7 解耦）：running 且 timeout_at 已过 → failed。
+   * 与 recoverFromRestart（启动序列专用，含存疑恢复事件）分离——本方法不写恢复事件，
+   * 消除每轮扫描为每个 running 任务堆积 task.restart-recovery 事件的噪音源。
+   */
+  expireTimedOut(): string[] {
+    const nowIso = new Date().toISOString();
+    const expiredIds: string[] = [];
+    for (const task of this.tasks.list({ status: 'running' })) {
+      if (task.timeout_at === null || task.timeout_at >= nowIso) continue;
+      withTransaction(this.db, () => {
+        this.tasks.updateStatus(task.id, 'failed');
+        const openRun = this.runs.byTask(task.id).find((r) => r.ended_at === null);
+        if (openRun) {
+          this.runs.finish(openRun.id, 'timeout', { errorMessage: '执行超时窗口已过（Watchdog timeout 分类）' });
+        }
+        this.audit.log({ actorRole: 'system', action: 'task.timeout', targetType: 'task', targetId: task.id });
+      });
+      this.events.ingest({
+        eventId: `watchdog-retry:${task.id}:timeout:${Date.now()}`,
+        source: 'internal',
+        type: 'task.watchdog_retry',
+        taskId: task.id,
+        payloadJson: JSON.stringify({ origin: 'timeout' }),
+      });
+      expiredIds.push(task.id);
+    }
+    return expiredIds;
   }
 
   /** Host 重启后存疑恢复的结果（机器消费值）。 */

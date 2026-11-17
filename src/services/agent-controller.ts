@@ -15,7 +15,7 @@ import type { WorkerReport } from '../protocols/worker-report.js';
 /** 派发结果（机器消费值）。 */
 export interface DispatchResult {
   dispatched: boolean;
-  reason: 'ok' | 'no-worker-session' | 'busy' | 'task-missing';
+  reason: 'ok' | 'no-worker-session' | 'busy' | 'task-missing' | 'adopted';
   taskId: string;
 }
 
@@ -60,6 +60,10 @@ export class AgentController {
   async dispatchTask(taskId: string): Promise<DispatchResult> {
     const task = this.taskManager.tasks.byId(taskId);
     if (!task) return { dispatched: false, reason: 'task-missing', taskId };
+    // 重派前收编（FB-3）：存在未应用的迟到终态汇报时先应用终态，不再重跑整个任务
+    if (this.taskManager.adoptLateReport(taskId, { role: 'system' })) {
+      return { dispatched: false, reason: 'adopted', taskId };
+    }
     const project = this.taskManager.projects.byId(task.project_id);
     const workerSession = project?.worker_session_id;
     if (!workerSession) return { dispatched: false, reason: 'no-worker-session', taskId };
@@ -85,7 +89,7 @@ export class AgentController {
    */
   applyWorkerReport(report: WorkerReport, callerSessionId: string): ReportOutcome {
     const outcome = this.taskManager.applyWorkerReport(report, callerSessionId);
-    if (outcome.accepted && (outcome.reason === 'applied')) {
+    if (outcome.accepted && (outcome.reason === 'applied' || outcome.reason === 'adopted')) {
       const permit = this.permits.get(report.taskId);
       if (permit) {
         permit.release();

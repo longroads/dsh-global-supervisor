@@ -72,4 +72,16 @@ export class WorkerReportRepository {
       .prepare('SELECT * FROM worker_reports WHERE task_id = ? ORDER BY id DESC LIMIT 1')
       .get(taskId) as WorkerReportRow | undefined;
   }
+
+  /** 最近一条可收编的未应用终态汇报（不早于基准时间、来自指定派发会话；同毫秒到达视为属于该 run）。 */
+  findLatestAdoptable(taskId: string, sessionId: string, notBeforeIso: string): WorkerReportRow | undefined {
+    return this.db
+      .prepare(
+        `SELECT * FROM worker_reports
+         WHERE task_id = ? AND session_id = ? AND applied = 0 AND received_at >= ?
+           AND status IN ('completed', 'need_human', 'failed')
+         ORDER BY id DESC LIMIT 1`,
+      )
+      .get(taskId, sessionId, notBeforeIso) as WorkerReportRow | undefined;
+  }
 }

@@ -284,3 +284,136 @@ describe('TaskManager 启动超时判定', () => {
     db.close();
   });
 });
+
+describe('TaskManager 迟到终态汇报收编（FB-1/FB-3，事故时间线 task-20261117-001 复现）', () => {
+  it('watchdog 判死重试回 queued 后，迟到 completed 汇报被收编为终态', async () => {
+    const { manager, db } = await setup();
+    const task = manager.createTask({ projectId: 'proj-1', title: '卡死原因分析' }, ROUTER);
+    manager.enqueue(task.id, ROUTER);
+    manager.markDispatched(task.id, WORKER, null);
+    // 08:19 watchdog starting 超时 → failed → retry → queued
+    manager.markStartupTimeout(task.id);
+    manager.retry(task.id, { role: 'system' });
+    expect(manager.tasks.byId(task.id)?.status).toBe('queued');
+    // 08:21 Worker 迟到 completed 汇报 → 收编
+    const outcome = manager.applyWorkerReport(
+      parseWorkerReport({ workspace_id: 'ws-1', task_id: task.id, status: 'completed', progress: 100, summary: '完整分析结论' }),
+      WORKER,
+    );
+    expect(outcome).toEqual({ accepted: true, reason: 'adopted', taskStatus: 'completed' });
+    expect(manager.tasks.byId(task.id)?.status).toBe('completed');
+    expect(manager.reports.latestOf(task.id)?.applied).toBe(1);
+    const audits = manager.audit.byTarget('task', task.id);
+    expect(audits.some((a) => a.action === 'worker_report.adopted')).toBe(true);
+    expect(audits.some((a) => a.action === 'worker_report.rejected')).toBe(false);
+    // 历史 run 的 timeout 记录保留（审计不可篡改）
+    expect(manager.runs.byTask(task.id)[0]?.outcome).toBe('timeout');
+    db.close();
+  });
+
+  it('failed 待重试态收到迟到 failed 汇报：状态不变、汇报标记已应用', async () => {
+    const { manager, db } = await setup();
+    const task = manager.createTask({ projectId: 'proj-1', title: 'T' }, ROUTER);
+    manager.enqueue(task.id, ROUTER);
+    manager.markDispatched(task.id, WORKER, null);
+    manager.markStartupTimeout(task.id);
+    expect(manager.tasks.byId(task.id)?.status).toBe('failed');
+    const outcome = manager.applyWorkerReport(
+      parseWorkerReport({ workspace_id: 'ws-1', task_id: task.id, status: 'failed', blockers: ['环境异常'] }),
+      WORKER,
+    );
+    expect(outcome).toEqual({ accepted: true, reason: 'adopted', taskStatus: 'failed' });
+    expect(manager.reports.latestOf(task.id)?.applied).toBe(1);
+    expect(manager.audit.byTarget('task', task.id).some((a) => a.action === 'worker_report.adopted')).toBe(true);
+    db.close();
+  });
+
+  it('running 中正常汇报路径不受收编影响（回归）', async () => {
+    const { manager, db } = await setup();
+    const task = manager.createTask({ projectId: 'proj-1', title: 'T' }, ROUTER);
+    manager.enqueue(task.id, ROUTER);
+    manager.markDispatched(task.id, WORKER, null);
+    const outcome = manager.applyWorkerReport(
+      parseWorkerReport({ workspace_id: 'ws-1', task_id: task.id, status: 'completed' }),
+      WORKER,
+    );
+    expect(outcome).toEqual({ accepted: true, reason: 'applied', taskStatus: 'completed' });
+    expect(manager.audit.byTarget('task', task.id).some((a) => a.action === 'worker_report.applied')).toBe(true);
+    db.close();
+  });
+
+  it('canceled/终态后的汇报仍拒收（invalid-transition）', async () => {
+    const { manager, db } = await setup();
+    const task = manager.createTask({ projectId: 'proj-1', title: 'T' }, ROUTER);
+    manager.enqueue(task.id, ROUTER);
+    manager.markDispatched(task.id, WORKER, null);
+    manager.cancel(task.id, ROUTER);
+    const outcome = manager.applyWorkerReport(
+      parseWorkerReport({ workspace_id: 'ws-1', task_id: task.id, status: 'completed' }),
+      WORKER,
+    );
+    expect(outcome).toEqual({ accepted: false, reason: 'invalid-transition', taskStatus: 'canceled' });
+    expect(manager.reports.latestOf(task.id)?.applied).toBe(0);
+    db.close();
+  });
+
+  it('迟到 blocked 汇报不收编（无终态语义，仍拒收）', async () => {
+    const { manager, db } = await setup();
+    const task = manager.createTask({ projectId: 'proj-1', title: 'T' }, ROUTER);
+    manager.enqueue(task.id, ROUTER);
+    manager.markDispatched(task.id, WORKER, null);
+    manager.markStartupTimeout(task.id);
+    manager.retry(task.id, { role: 'system' });
+    const outcome = manager.applyWorkerReport(
+      parseWorkerReport({ workspace_id: 'ws-1', task_id: task.id, status: 'blocked', blockers: ['x'] }),
+      WORKER,
+    );
+    expect(outcome).toEqual({ accepted: false, reason: 'invalid-transition', taskStatus: 'queued' });
+    db.close();
+  });
+
+  it('adoptLateReport：重派前发现未应用终态汇报（升级前历史数据）则收编并返回 true', async () => {
+    const { manager, db } = await setup();
+    const task = manager.createTask({ projectId: 'proj-1', title: 'T' }, ROUTER);
+    manager.enqueue(task.id, ROUTER);
+    manager.markDispatched(task.id, WORKER, null);
+    manager.markStartupTimeout(task.id);
+    manager.retry(task.id, { role: 'system' });
+    // 模拟收编机制上线前落库的 applied=0 迟到汇报（绕过 applyWorkerReport 直接入库）
+    manager.reports.record({
+      taskId: task.id,
+      sessionId: WORKER,
+      status: 'completed',
+      progress: 100,
+      summary: '历史遗留的完整交付',
+    });
+    expect(manager.adoptLateReport(task.id, { role: 'system' })).toBe(true);
+    expect(manager.tasks.byId(task.id)?.status).toBe('completed');
+    expect(manager.reports.latestOf(task.id)?.applied).toBe(1);
+    expect(manager.audit.byTarget('task', task.id).some((a) => a.action === 'worker_report.pre-adopted')).toBe(true);
+    // 再次调用（已无未应用汇报）返回 false
+    expect(manager.adoptLateReport(task.id, { role: 'system' })).toBe(false);
+    db.close();
+  });
+
+  it('adoptLateReport：非 queued/failed 态或陈旧汇报不收编', async () => {
+    const { manager, db } = await setup();
+    const task = manager.createTask({ projectId: 'proj-1', title: 'T' }, ROUTER);
+    expect(manager.adoptLateReport(task.id, { role: 'system' })).toBe(false);
+
+    manager.enqueue(task.id, ROUTER);
+    manager.markDispatched(task.id, WORKER, null);
+    manager.markStartupTimeout(task.id);
+    manager.retry(task.id, { role: 'system' });
+    manager.reports.record({
+      taskId: task.id,
+      sessionId: WORKER,
+      status: 'completed',
+      summary: '汇报',
+    });
+    // 基准时间晚于汇报 received_at（陈旧汇报）→ 不收编
+    const futureIso = new Date(Date.now() + 60_000).toISOString();
+    expect(manager.reports.findLatestAdoptable(task.id, WORKER, futureIso)).toBeUndefined();
+    db.close();
+  });
+});
