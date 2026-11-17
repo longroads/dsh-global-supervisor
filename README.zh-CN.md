@@ -8,7 +8,7 @@ DSH（DeepSeek Harness）全局监督插件：跨 Workspace 的项目管理、�
 
 ## 核心特性
 
-- **Router/Worker 分工**：Router 会话持有 `supervisor_*` 工具集（25 个）统一调度；Worker 会话经 `worker_report` 结构化汇报（权限服务端校验，非 Prompt 约束）。
+- **Router/Worker 分工**：Router 会话持有 `supervisor_*` 工具集（26 个）统一调度；Worker 会话经 `worker_report` 结构化汇报（权限服务端校验，非 Prompt 约束）。
 - **任务状态机**：`pending → queued → running → completed` 及 `blocked / need_human / failed / canceled`，严格转换表 + 审计留痕；Task 与 TaskRun 分离，重试不覆盖历史。
 - **SQLite 持久化**：十三张表（八表基线 + plugin_settings / routing_rules / event_routing_rules / thread_subscriptions 等），基于 Node 内建 `node:sqlite`，零原生依赖。
 - **事件驱动**：Webhook 接入外部事件 + 五种 cordis 内部事件订阅，统一流水去重；observe/auto 双模式规则路由（转述/静音/直投 Worker），多条事件自动合批为一条 Router 通知。
@@ -16,6 +16,7 @@ DSH（DeepSeek Harness）全局监督插件：跨 Workspace 的项目管理、�
 - **上下文召回**：`supervisor_recall` 按事件/任务 ID 一跳召回关联上下文（同 Thread 事件、订阅任务、Worker 汇报、执行历史）。
 - **看门狗四分类**：启动超时重试（默认 10 分钟窗口 + Worker 活跃宽限）/ 执行超时重试 / 需人工超时升级 / Worker 空闲失联检测，每 5 分钟自动扫描（间隔同样可经 `supervisor_watchdog_config` 运行时调整）；判死与重试必通知 Router。
 - **Router 执行守卫**：Router 会话工具调用指向其他受管 workspace 路径时告警；用户消息命中路由偏好时注入"应派发而非自执行"提示；用户纠正时建议固化路由规则。
+- **会话供给与退化干预**：`supervisor_session_create` 按需在受管 workspace 下新建 Worker 会话；`supervisor_task_assign` 支持 `session_id`/`fresh_session`（一任务一专用执行体，零上下文污染）；steer 兼容 need_human（引导继续）；会话空转检测（连续回合无工具产出即告警并建议轮换）。
 - **IM 推送（可选）**：经 dsh-im 把需人工提醒与完成摘要推到飞书/Telegram 等手机 IM，不可用自动降级 Router 会话。
 - **串行派发**：ModelQueue 默认并发 1，优先级插队不抢占运行中任务，适配本地推理资源。
 - **定时巡检**：复用 DSH 原生 Host-wide Schedule（0.2.2-rc.x），不自研 Cron。
@@ -51,7 +52,7 @@ dsh plugin --profile desktop update dsh-global-supervisor
 
 ## 状态
 
-当前版本 0.6.2：生产反馈加固版（2026-11-17 反馈报告 8 项全部落地）——迟到终态汇报收编（消除"已交付却卡重试"）、重派前检查未应用汇报、闭环通知硬接线（拒收/终态/判死重试/预算耗尽必达 Router，独立于事件路由模式）、启动窗口默认 10 分钟 + Worker 活跃宽限 + `supervisor_watchdog_config` 运行时调参（扫描间隔默认 5 分钟，同样可调）、周期扫描与 restart-recovery 解耦（不再堆事件）、Router 执行守卫（越权告警 + 派发引导 + 纠正即学习）、纳管首项目巡检引导。0.6.2 另修复热重载路由泄漏：插件升级不重启 Host 时，旧实例面板路由不释放曾导致工具注册崩溃、插件半死（管理面活着、执行面全灭）——现在路由 disposer 绑定插件生命周期、duplicate 降级沿用、面板 API 失败不再拖死工具注册。26 个工具（25 Router + worker_report）、239 个单测。注意：0.6.0 为缺陷发布（package.json 带 UTF-8 BOM，DSH 安装器 JSON 校验失败），已被取代——请直接更新到最新版。
+当前版本 0.7.0：生产反馈加固与能力补全——0.6.x 系列（迟到汇报收编、闭环通知硬接线、看门狗调参、执行守卫、热重载路由泄漏修复）之上，新增：FB-9 退化任务干预（steer 兼容 need_human 引导继续、会话空转检测与轮换建议）；FB-10 会话供给（supervisor_session_create 按需建会话、assign 支持任务级专用执行体 fresh_session/session_id，固化"自包含任务描述 + 成果落盘"模式）。27 个工具（26 Router + worker_report）、245 个单测。注意：0.6.0 为缺陷发布（BOM），已被取代——请直接更新到最新版。
 
 ## License
 

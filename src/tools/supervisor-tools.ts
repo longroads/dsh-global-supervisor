@@ -222,20 +222,43 @@ export function buildSupervisorTools(stack: SupervisorStack): ToolDefinition[] {
 
   tools.push(makeTool({
     name: 'supervisor_task_assign',
-    description: '派发任务：入队并提交给项目 Worker 会话执行（含 worker_report 汇报要求）',
-    parameters: OBJ({ task_id: { type: 'string' } }, ['task_id']),
+    description: '派发任务：入队并提交给 Worker 会话执行（含 worker_report 汇报要求）。默认用项目 Worker 会话；session_id 指定其他会话执行本任务（一任务一执行体，不写回项目绑定）；fresh_session=true 自动新建专用会话执行（任务描述需自包含：基线数据/文件路径/步骤，成果写入磁盘文件——零上下文污染，长寿命会话退化时的标准处置）',
+    parameters: OBJ({
+      task_id: { type: 'string' },
+      session_id: { type: 'string', description: '指定执行会话（可选；不填用项目 Worker）' },
+      fresh_session: { type: 'boolean', description: 'true 时为本任务新建专用会话（可选）' },
+    }, ['task_id']),
     resultSchema: RESULT,
     guard, guardDeniedMessage: DENIED,
     timeoutMs: 120_000,
     handler: async (args, ctx) => {
-      const taskId = stringArg(asRecord(args), 'task_id');
+      const record = asRecord(args);
+      const taskId = stringArg(record, 'task_id');
+      let override: { sessionId: string } | undefined;
+      if (record['fresh_session'] === true) {
+        const task = stack.taskManager.tasks.byId(taskId);
+        const project = task ? stack.taskManager.projects.byId(task.project_id) : undefined;
+        const workspaceId = project?.workspace_id;
+        if (!workspaceId) return { ok: false, error: `task-not-found-or-no-project: ${taskId}` };
+        const path = await resolveWorkspacePath(stack, workspaceId);
+        if (path === undefined) return { ok: false, error: `workspace-path-unresolved: ${workspaceId}` };
+        try {
+          const sessionId = await stack.agentController.createWorkerSession(path, { sessionId: ctx.callerSessionId, role: 'router' });
+          override = { sessionId };
+        } catch (error) {
+          return { ok: false, error: `session-create-failed: ${error instanceof Error ? error.message : String(error)}` };
+        }
+      } else {
+        const sessionId = optionalStringArg(record, 'session_id');
+        if (sessionId !== undefined) override = { sessionId };
+      }
       try {
         stack.taskManager.enqueue(taskId, { sessionId: ctx.callerSessionId, role: 'router' });
       } catch (error) {
         return { ok: false, error: error instanceof Error ? error.message : String(error) };
       }
-      const dispatch = await stack.agentController.dispatchTask(taskId);
-      return { ok: dispatch.dispatched, dispatch };
+      const dispatch = await stack.agentController.dispatchTask(taskId, override);
+      return { ok: dispatch.dispatched, dispatch, ...(override !== undefined ? { session_id: override.sessionId, session_scope: 'task' } : {}) };
     },
   }));
 
@@ -505,7 +528,7 @@ export function buildSupervisorTools(stack: SupervisorStack): ToolDefinition[] {
 
   tools.push(makeTool({
     name: 'supervisor_task_steer',
-    description: '向运行中任务的 Worker 会话插入纠偏指令（当前轮的下一个模型步生效，不打断进行中的工具调用）。适用于方向修正/补充上下文，无需取消重派',
+    description: '向任务的 Worker 会话插入纠偏指令（当前轮的下一个模型步生效，不打断进行中的工具调用）。适用于方向修正/补充上下文；need_human 状态下可用作"引导继续"（注入人工决策后引导 Worker 恢复执行）',
     parameters: OBJ({
       task_id: { type: 'string' },
       text: { type: 'string', description: '纠偏指令内容' },
@@ -520,7 +543,11 @@ export function buildSupervisorTools(stack: SupervisorStack): ToolDefinition[] {
       if (text.trim() === '') return { ok: false, error: 'text 不能为空' };
       const task = stack.taskManager.tasks.byId(taskId);
       if (!task) return { ok: false, error: `task-not-found: ${taskId}` };
-      if (task.status !== 'running') return { ok: false, error: `task-not-running: 当前状态 ${task.status}（steer 仅适用于运行中任务）` };
+      // FB-9①：need_human 也允许 steer——会话等待人工决策时注入决策/引导继续，
+      // 让 Router 不必"取消+重派"才能救活任务
+      if (task.status !== 'running' && task.status !== 'need_human') {
+        return { ok: false, error: `task-not-steerable: 当前状态 ${task.status}（steer 仅适用于 running / need_human 任务）` };
+      }
       if (!task.assigned_session_id) return { ok: false, error: 'no-assigned-session' };
       const steered = await stack.agentController.steerTask(taskId, text, { sessionId: ctx.callerSessionId, role: 'router' });
       return steered ? { ok: true, task_id: taskId } : { ok: false, error: 'steer-failed' };
@@ -669,7 +696,44 @@ export function buildSupervisorTools(stack: SupervisorStack): ToolDefinition[] {
     },
   }));
 
+  tools.push(makeTool({
+    name: 'supervisor_session_create',
+    description: '在受管 workspace 下按需创建全新 Worker 会话（FB-10①：会话供给——换绑不再依赖"恰好有另一个空闲会话"的巧合）。返回新 session_id，可用 supervisor_workspace_update 绑定为项目 Worker，或 supervisor_task_assign 的 session_id 参数单任务使用。长寿命会话行为退化（空转/汇报循环）时的标准轮换手段',
+    parameters: OBJ({ workspace_id: { type: 'string', description: '受管 DSH workspace ID（须已纳管）' } }, ['workspace_id']),
+    resultSchema: RESULT,
+    guard, guardDeniedMessage: DENIED,
+    timeoutMs: 60_000,
+    handler: async (args, ctx) => {
+      const record = asRecord(args);
+      const workspaceId = stringArg(record, 'workspace_id');
+      const project = await stack.workspaceManager.projectByWorkspace(workspaceId);
+      if (!project) return { ok: false, error: `workspace-not-managed: ${workspaceId}（先 supervisor_workspace_adopt 纳管）` };
+      const path = await resolveWorkspacePath(stack, workspaceId);
+      if (path === undefined) return { ok: false, error: `workspace-path-unresolved: ${workspaceId}` };
+      try {
+        const sessionId = await stack.agentController.createWorkerSession(path, { sessionId: ctx.callerSessionId, role: 'router' });
+        return {
+          ok: true,
+          session_id: sessionId,
+          workspace_id: workspaceId,
+          hints: [
+            `绑定为项目 Worker：supervisor_workspace_update（workspace_id=${workspaceId}, worker_session_id=${sessionId}）`,
+            '或单任务使用：supervisor_task_assign（session_id 参数）——任务描述需自包含，成果写入磁盘文件',
+          ],
+        };
+      } catch (error) {
+        return { ok: false, error: `session-create-failed: ${error instanceof Error ? error.message : String(error)}` };
+      }
+    },
+  }));
+
   return tools;
+}
+
+/** 解析受管 workspace 的本地路径（listWorkspaceOverview 一次查询；未纳管的 workspace 返回 undefined）。 */
+async function resolveWorkspacePath(stack: SupervisorStack, workspaceId: string): Promise<string | undefined> {
+  const overview = await stack.workspaceManager.listWorkspaceOverview(true);
+  return overview.find((item) => item.workspaceId === workspaceId)?.path;
 }
 
 /** 单项目巡检：创建巡检任务并入队派发。 */

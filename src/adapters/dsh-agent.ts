@@ -70,6 +70,16 @@ export class DshAgentAdapter {
   }
 
   /**
+   * 创建全新 Worker 会话（FB-10①：会话供给，agents.create 为探针 VERIFIED 能力）。
+   * 身份由调用方生成（session-<uuid>）；cwd 必须是受管 workspace 的绝对路径（会话边界校验）。
+   * 不持久化 AgentHandle——后续派发走既有 get-or-resume 链路（Host 重启安全）。
+   */
+  async createSession(sessionId: string, cwd: string): Promise<void> {
+    const agents = await this.agents();
+    await agents.create({ sessionId: sessionId as SessionId, meta: { cwd } });
+  }
+
+  /**
    * 派发任务指令：ensureAgent → followup（排队一个完整执行轮次）。
    * modelPref 非空时在 followup 前应用模型选择（任务边界切换，KV-cache 代价最小；
    * select 等值幂等、持久化进会话日志——见 dsh-agent model-selection）。

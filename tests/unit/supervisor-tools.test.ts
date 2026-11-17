@@ -36,11 +36,12 @@ function execOf(sessionId: string): ToolRunContext {
   return { agent: { id: sessionId }, signal: new AbortController().signal } as unknown as ToolRunContext;
 }
 
-/** Agent 服务间谍：live 会话上捕获 model.select / followup / steer 调用。 */
+/** Agent 服务间谍：live 会话上捕获 model.select / followup / steer / create 调用。 */
 const agentSpies = {
   selects: [] as Array<Record<string, unknown>>,
   followups: [] as string[],
   steers: [] as string[],
+  creates: [] as Array<Record<string, unknown>>,
 };
 
 function textOf(message: unknown): string {
@@ -63,6 +64,7 @@ async function buildStack(seedProject = true): Promise<SupervisorStack> {
   agentSpies.selects.length = 0;
   agentSpies.followups.length = 0;
   agentSpies.steers.length = 0;
+  agentSpies.creates.length = 0;
   const projcacheDir = mkdtempSync(join(tmpdir(), 'projcache-tools-'));
   projcacheDirs.push(projcacheDir);
   writeFileSync(join(projcacheDir, `${WORKER_SESSION}.json`), JSON.stringify({ record: { rows: { title: { val: '切换cloud2bim会话模型为GLM-5.3' } } } }), 'utf8');
@@ -90,6 +92,10 @@ async function buildStack(seedProject = true): Promise<SupervisorStack> {
     get: (sessionId: string) => (sessionId === WORKER_SESSION ? liveAgent : undefined),
     list: () => [liveAgent],
     resume: async () => ({ agent: liveAgent }),
+    create: async (options: Record<string, unknown>) => {
+      agentSpies.creates.push(options);
+      return { agent: liveAgent, dispose: () => undefined };
+    },
   };
   const llmService = {
     listProviders: () => [{ id: 'p1', name: 'Provider One' }],
@@ -388,14 +394,14 @@ describe('supervisor 工具权限与任务流', () => {
     expect((noAnchor as { ok: boolean }).ok).toBe(false);
   });
 
-  it('supervisor_task_steer：运行中任务插入纠偏并留审计；非 running 拒绝', async () => {
+  it('supervisor_task_steer：running 与 need_human 均可纠偏；其余状态拒绝（FB-9①）', async () => {
     const stack = await buildStack();
     const tools = buildSupervisorTools(stack);
     const steer = tools.find((t) => t.name === 'supervisor_task_steer') as ToolDefinition;
     const pending = stack.taskManager.createTask({ projectId: 'proj-1', title: 'T' }, { sessionId: ROUTER_SESSION, role: 'router' });
     const denied = await steer.execute({ task_id: pending.id, text: '换个方向' }, execOf(ROUTER_SESSION));
     expect((denied as { ok: boolean }).ok).toBe(false);
-    expect((denied as { error: string }).error).toContain('task-not-running');
+    expect((denied as { error: string }).error).toContain('task-not-steerable');
 
     stack.taskManager.enqueue(pending.id, { sessionId: ROUTER_SESSION, role: 'router' });
     stack.taskManager.markDispatched(pending.id, WORKER_SESSION, null);
@@ -404,6 +410,61 @@ describe('supervisor 工具权限与任务流', () => {
     expect(agentSpies.steers).toHaveLength(1);
     expect(agentSpies.steers[0]).toContain('兼容性矩阵');
     expect(stack.taskManager.audit.byTarget('task', pending.id).some((a) => a.action === 'task.steer')).toBe(true);
+
+    // need_human 态放开（引导继续语义）：注入人工决策引导 Worker 恢复
+    const second = stack.taskManager.createTask({ projectId: 'proj-1', title: 'T2' }, { sessionId: ROUTER_SESSION, role: 'router' });
+    stack.taskManager.enqueue(second.id, { sessionId: ROUTER_SESSION, role: 'router' });
+    stack.taskManager.markDispatched(second.id, WORKER_SESSION, null);
+    stack.taskManager.applyWorkerReport(parseWorkerReport({ workspace_id: 'ws-1', task_id: second.id, status: 'need_human', need_human: true }), WORKER_SESSION);
+    const guided = await steer.execute({ task_id: second.id, text: '决策：采用方案 B，继续执行' }, execOf(ROUTER_SESSION));
+    expect((guided as { ok: boolean }).ok).toBe(true);
+    expect(agentSpies.steers).toHaveLength(2);
+  });
+
+  it('supervisor_task_assign session_id 覆盖：任务派发到指定会话（一任务一执行体，FB-10②）', async () => {
+    const stack = await buildStack();
+    const tools = buildSupervisorTools(stack);
+    const assign = tools.find((t) => t.name === 'supervisor_task_assign') as ToolDefinition;
+    const task = stack.taskManager.createTask({ projectId: 'proj-1', title: '专用会话任务' }, { sessionId: ROUTER_SESSION, role: 'router' });
+    const result = await assign.execute({ task_id: task.id, session_id: 'session-fresh-x' }, execOf(ROUTER_SESSION));
+    expect((result as { ok: boolean }).ok).toBe(true);
+    expect((result as { session_id: string }).session_id).toBe('session-fresh-x');
+    expect((result as { session_scope: string }).session_scope).toBe('task');
+    // 派发簿记落在任务上，且不改变项目 Worker 绑定
+    expect(stack.taskManager.tasks.byId(task.id)?.assigned_session_id).toBe('session-fresh-x');
+    expect(stack.taskManager.projects.byId('proj-1')?.worker_session_id).toBe(WORKER_SESSION);
+    expect(agentSpies.followups).toHaveLength(1);
+  });
+
+  it('supervisor_task_assign fresh_session：自动新建专用会话并派发（FB-10②）', async () => {
+    const stack = await buildStack();
+    const tools = buildSupervisorTools(stack);
+    const assign = tools.find((t) => t.name === 'supervisor_task_assign') as ToolDefinition;
+    const task = stack.taskManager.createTask({ projectId: 'proj-1', title: '自包含任务' }, { sessionId: ROUTER_SESSION, role: 'router' });
+    const result = await assign.execute({ task_id: task.id, fresh_session: true }, execOf(ROUTER_SESSION));
+    expect((result as { ok: boolean }).ok).toBe(true);
+    const createdId = (result as { session_id: string }).session_id;
+    expect(createdId).toMatch(/^session-/);
+    expect(stack.taskManager.tasks.byId(task.id)?.assigned_session_id).toBe(createdId);
+    // agents.create 被调用且 cwd 指向 workspace 路径
+    expect(agentSpies.creates).toHaveLength(1);
+    expect((agentSpies.creates[0]?.['meta'] as { cwd?: string })?.cwd).toBe('E:\\proj\\p1');
+    expect(stack.taskManager.audit.byAction('session.create')).toHaveLength(1);
+  });
+
+  it('supervisor_session_create：受管 workspace 下创建新会话并返回使用提示（FB-10①）', async () => {
+    const stack = await buildStack();
+    const tools = buildSupervisorTools(stack);
+    const createTool = tools.find((t) => t.name === 'supervisor_session_create') as ToolDefinition;
+    const result = await createTool.execute({ workspace_id: 'ws-1' }, execOf(ROUTER_SESSION));
+    expect((result as { ok: boolean }).ok).toBe(true);
+    expect((result as { session_id: string }).session_id).toMatch(/^session-/);
+    expect((result as { workspace_id: string }).workspace_id).toBe('ws-1');
+    expect((agentSpies.creates[0]?.['meta'] as { cwd?: string })?.cwd).toBe('E:\\proj\\p1');
+    // 未纳管 workspace 拒绝
+    const rejected = await createTool.execute({ workspace_id: 'ws-unknown' }, execOf(ROUTER_SESSION));
+    expect((rejected as { ok: boolean }).ok).toBe(false);
+    expect((rejected as { error: string }).error).toContain('workspace-not-managed');
   });
 
   it('supervisor_model_set 项目锚点：写偏好、目录校验通过，派发时应用 select', async () => {

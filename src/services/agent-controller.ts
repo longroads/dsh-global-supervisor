@@ -54,10 +54,31 @@ export class AgentController {
   }
 
   /**
+   * 按需创建 Worker 会话（FB-10①）：生成 session-<uuid> 身份并落在指定 workspace 目录。
+   * 用于长寿命会话行为退化后的会话轮换、或一任务一专用执行体（零上下文污染）。
+   */
+  async createWorkerSession(cwd: string, actor: { sessionId?: string; role: 'router' | 'system' }): Promise<string> {
+    const { randomUUID } = await import('../utils/id.js');
+    const sessionId = `session-${(await randomUUID())}`;
+    await this.agents.createSession(sessionId, cwd);
+    this.taskManager.audit.log({
+      actorSessionId: actor.sessionId,
+      actorRole: actor.role,
+      action: 'session.create',
+      targetType: 'session',
+      targetId: sessionId,
+      detailJson: JSON.stringify({ cwd }),
+    });
+    return sessionId;
+  }
+
+  /**
    * 派发任务：queued → running → followup 指令（含汇报要求）。
    * 并发许可保持到 worker_report 终态。
+   * sessionOverride（FB-10②）：任务级执行体——指定会话执行本任务（一任务一专用会话，
+   * 不写回项目 worker_session_id，跑完即弃，零上下文污染）。
    */
-  async dispatchTask(taskId: string): Promise<DispatchResult> {
+  async dispatchTask(taskId: string, sessionOverride?: { sessionId: string }): Promise<DispatchResult> {
     const task = this.taskManager.tasks.byId(taskId);
     if (!task) return { dispatched: false, reason: 'task-missing', taskId };
     // 重派前收编（FB-3）：存在未应用的迟到终态汇报时先应用终态，不再重跑整个任务
@@ -65,7 +86,7 @@ export class AgentController {
       return { dispatched: false, reason: 'adopted', taskId };
     }
     const project = this.taskManager.projects.byId(task.project_id);
-    const workerSession = project?.worker_session_id;
+    const workerSession = sessionOverride?.sessionId ?? project?.worker_session_id ?? undefined;
     if (!workerSession) return { dispatched: false, reason: 'no-worker-session', taskId };
     if (await this.agents.isBusy(workerSession)) {
       return { dispatched: false, reason: 'busy', taskId };
@@ -73,7 +94,7 @@ export class AgentController {
     const permit = await this.queue.submit({ id: taskId, priority: task.priority });
     try {
       this.taskManager.markDispatched(taskId, workerSession, new Date(Date.now() + DEFAULT_TIMEOUT_MS).toISOString());
-      const modelPref = parseModelPref(task.model_pref_json) ?? parseModelPref(project.model_pref_json);
+      const modelPref = parseModelPref(task.model_pref_json) ?? parseModelPref(project?.model_pref_json);
       await this.agents.dispatch(workerSession, this.buildInstruction(taskId, task.title, task.description), modelPref);
       this.permits.set(taskId, permit);
       return { dispatched: true, reason: 'ok', taskId };

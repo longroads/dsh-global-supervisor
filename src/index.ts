@@ -262,12 +262,23 @@ export function apply(ctx: Context, config: PluginConfig): void {
           isRouter: (sessionId) => stack.routerIdentity.isRouter(sessionId),
         });
         // EventManager 派发规则：Worker turn 结束 → 刷新对应 running 任务心跳（Watchdog 数据源）
+        // + 会话空转检测（FB-9②：turn 结束且无工具产出 → SessionHealth 计数告警）
+        const { SessionHealth } = await import('./services/session-health.js');
+        const sessionHealth = new SessionHealth(stack.taskManager.tasks, {
+          notify: (message, severity) => stack.notifier.notify(message, severity),
+        });
         stack.eventManager.on('turn.end', async (event) => {
           const payload = JSON.parse(event.payload_json) as { sessionId?: string };
           if (!payload.sessionId) return;
+          await sessionHealth.observeTurnEnd(payload.sessionId);
           for (const task of stack.taskManager.tasks.list({ status: 'running' })) {
             if (task.assigned_session_id === payload.sessionId) stack.taskManager.tasks.touchReport(task.id);
           }
+        });
+        // 工具调用产出 → 空转计数清零（FB-9②）
+        stack.eventManager.on('tool.result', (event) => {
+          const payload = JSON.parse(event.payload_json) as { agentId?: string };
+          if (payload.agentId) sessionHealth.observeToolResult(payload.agentId);
         });
         // Router 用户消息路由预检（FB-6）：仅人类消息（EventRow.human 列存 0/1）；
         // payload 形状同 agent/inbox/inserted 接入（{agentId, content}），字段经 typeof 收窄

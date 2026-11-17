@@ -8,7 +8,7 @@ A single Router session manages many project workspaces: identify projects, disp
 
 ## Highlights
 
-- **Router/Worker split** — the Router session holds 25 `supervisor_*` tools; worker sessions report via `worker_report` with server-side permission checks (not prompt constraints).
+- **Router/Worker split** — the Router session holds 26 `supervisor_*` tools; worker sessions report via `worker_report` with server-side permission checks (not prompt constraints).
 - **Task state machine** — `pending → queued → running → completed` plus `blocked / need_human / failed / canceled`; strict transition table with audit trail; Task/TaskRun separation keeps retry history intact.
 - **SQLite persistence** — 13 tables on built-in `node:sqlite`, zero native dependencies.
 - **Event-driven** — webhook intake + 5 cordis event subscriptions with a unified dedup pipeline; observe/auto rule routing; multiple events batched into one Router notification.
@@ -16,6 +16,7 @@ A single Router session manages many project workspaces: identify projects, disp
 - **Context recall** — `supervisor_recall` pulls related context (thread events, subscriptions, worker reports, run history) in one hop.
 - **Watchdog, 4 classes** — startup-timeout retry (10-min window with live-agent grace, tunable at runtime via `supervisor_watchdog_config`), run-timeout retry, need-human escalation, idle/lost worker detection; 5-minute scans by default (interval also tunable). Judgements and retries always notify the Router.
 - **Router execution guard** — flags Router-session tool calls that target other managed workspaces, injects "dispatch instead of self-execute" hints on routing-preference hits, and suggests saving a routing rule when the user corrects the Router.
+- **Session supply & degeneration response** — `supervisor_session_create` provisions fresh worker sessions on demand; `supervisor_task_assign` accepts `session_id`/`fresh_session` for one-task-one-executor isolation (zero context pollution); steer works on `need_human` tasks (guide-and-continue); idle-spin detection warns when a worker session finishes turns without any tool output.
 - **IM push (optional)** — need-human alerts and completion summaries to Feishu/Telegram etc. via dsh-im, with automatic fallback to the Router session.
 - **Model control** — per-task / per-project model selection and switching; `steer` to inject instructions into a running task.
 - **Serial dispatch** — ModelQueue defaults to concurrency 1 with priority queue-jumping that never preempts a running task, tuned for local inference.
@@ -52,7 +53,7 @@ Full documentation ships inside the npm package (in Chinese) at `node_modules/ds
 
 ## Status
 
-Version 0.6.2 — production-feedback hardening release (feedback report 2026-11-17, all 8 items): late terminal reports are now adopted instead of silently rejected (no more "delivered but stuck in retry"), dispatch checks for unapplied reports before re-running, watchdog notifications are hard-wired (reject/terminal/retry/retry-exhausted always reach the Router, independent of event-routing mode), the startup window defaults to 10 min with live-agent grace and runtime tuning via `supervisor_watchdog_config` (interval defaults to 5 min, also tunable), periodic scanning no longer spams `task.restart-recovery` events, a Router execution guard flags cross-workspace tool calls and injects dispatch hints (plus correction-as-learning prompts), and adopting the first workspace now suggests a patrol schedule. 0.6.2 additionally fixes a hot-reload route leak: on plugin upgrade without a host restart, stale panel routes used to crash tool registration and leave the plugin half-dead — routes are now fiber-scoped disposers, duplicates degrade gracefully, and panel-API failures no longer block tool registration. 26 tools (25 Router + `worker_report`), 239 unit tests. Note: 0.6.0 was a broken publish (UTF-8 BOM in package.json failed the DSH installer's JSON validation) and is superseded by 0.6.1+ — update directly to the latest.
+Version 0.7.0 — production-feedback hardening and capability completion. On top of the 0.6.x series (late-report adoption, hard-wired closed-loop notifications, runtime-tunable watchdog, Router execution guard, hot-reload route-leak fix), this release adds: degeneration response (steer now works on `need_human` tasks as guide-and-continue; idle-spin detection warns when a worker session finishes turns with no tool output and suggests rotation) and session supply (`supervisor_session_create` provisions fresh worker sessions on demand; `supervisor_task_assign` accepts `session_id`/`fresh_session` for one-task-one-executor isolation, cementing the self-contained-task + results-on-disk pattern). 27 tools (26 Router + `worker_report`), 245 unit tests. Note: 0.6.0 was a broken publish (UTF-8 BOM) and is superseded — always update to the latest.
 
 ## License
 
