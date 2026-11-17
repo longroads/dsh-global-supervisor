@@ -9,6 +9,9 @@
 import type { Context } from '@deepseek-ai/cordis';
 import z from '@deepseek-ai/schemastery';
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools';
+import { DshAgentAdapter } from './adapters/dsh-agent.js';
+import { RouterGuard } from './services/router-guard.js';
+import type { WorkspaceManager } from './services/workspace-manager.js';
 import type {} from '@deepseek-ai/dsh-workspace';
 import type {} from '@deepseek-ai/dsh-agent';
 import type {} from '@deepseek-ai/dsh-schedule';
@@ -105,6 +108,29 @@ async function writeLoadMarker(stage: string, detail: unknown): Promise<void> {
   } catch {
     // 文件系统不可用时无通道可写——保持静默，由探针报告缺失间接暴露
   }
+}
+
+/**
+ * workspaceId → path 解析工厂（RouterGuard 依赖）：
+ * 经 listWorkspaceOverview 缓存 id→path 映射（60s TTL 惰性刷新；解析失败沿用旧缓存）。
+ */
+function createWorkspacePathResolver(
+  workspaceManager: WorkspaceManager,
+): (workspaceId: string) => Promise<string | undefined> {
+  let cache = new Map<string, string>();
+  let cachedAt = 0;
+  return async (workspaceId) => {
+    if (Date.now() - cachedAt > 60_000) {
+      try {
+        const overview = await workspaceManager.listWorkspaceOverview(true);
+        cache = new Map(overview.map((item) => [item.workspaceId, item.path]));
+        cachedAt = Date.now();
+      } catch {
+        // workspaceRegistry 暂不可达：沿用旧缓存（守卫侧对 undefined 路径直接跳过）
+      }
+    }
+    return cache.get(workspaceId);
+  };
 }
 
 /**
@@ -210,6 +236,9 @@ export function apply(ctx: Context, config: PluginConfig): void {
               payloadJson: JSON.stringify({ toolName: exec.name, agentId }),
             });
           }
+          // Router 执行守卫（FB-5 层1）：越权路径事后检测（不拦截）；arguments 为 unknown，序列化截断后交守卫
+          const guardArgsJson = JSON.stringify(exec.arguments ?? {}).slice(0, 2000);
+          void routerGuard.onToolResult(exec.agent?.id ?? '', exec.name, guardArgsJson);
           return undefined;
         });
         ctx.on('session/event', (session, event) => {
@@ -221,12 +250,35 @@ export function apply(ctx: Context, config: PluginConfig): void {
             payloadJson: JSON.stringify({ sessionId: session.id, turn: event.data.turn, reason: event.data.reason }),
           });
         });
+        // Router 执行守卫（生产反馈 FB-5 层1 + FB-6）：越权执行事后告警 / 用户消息路由预检 / 纠正即学习
+        // steer 走 agentAdapter.steer（AgentController 不暴露 adapter，此处自建无状态适配器实例）
+        const guardAgentAdapter = new DshAgentAdapter(ctx);
+        const routerGuard = new RouterGuard({
+          routingRules: stack.routingRules,
+          projects: stack.taskManager.projects,
+          resolveWorkspacePath: createWorkspacePathResolver(stack.workspaceManager),
+          steer: (sessionId, text) => guardAgentAdapter.steer(sessionId, text),
+          notify: (message, severity) => stack.notifier.notify(message, severity),
+          isRouter: (sessionId) => stack.routerIdentity.isRouter(sessionId),
+        });
         // EventManager 派发规则：Worker turn 结束 → 刷新对应 running 任务心跳（Watchdog 数据源）
         stack.eventManager.on('turn.end', async (event) => {
           const payload = JSON.parse(event.payload_json) as { sessionId?: string };
           if (!payload.sessionId) return;
           for (const task of stack.taskManager.tasks.list({ status: 'running' })) {
             if (task.assigned_session_id === payload.sessionId) stack.taskManager.tasks.touchReport(task.id);
+          }
+        });
+        // Router 用户消息路由预检（FB-6）：仅人类消息（EventRow.human 列存 0/1）；
+        // payload 形状同 agent/inbox/inserted 接入（{agentId, content}），字段经 typeof 收窄
+        stack.eventManager.on('user.message', async (event) => {
+          try {
+            if (event.human !== 1) return;
+            const payload = JSON.parse(event.payload_json) as { agentId?: unknown; content?: unknown };
+            if (typeof payload.agentId !== 'string' || typeof payload.content !== 'string') return;
+            await routerGuard.onUserMessage(payload.agentId, payload.content);
+          } catch (error) {
+            ctx.logger.warn(`user.message 路由预检失败：${error instanceof Error ? error.message : String(error)}`);
           }
         });
         // Phase 2 事件路由决策层（'*' 全量通配；route 内部永不抛错，派发失败降级 pending 记审计）
