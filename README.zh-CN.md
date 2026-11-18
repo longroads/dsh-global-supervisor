@@ -54,7 +54,7 @@ dsh plugin --profile desktop update dsh-global-supervisor
 
 ## 状态
 
-当前版本 0.7.5：预设可观测与汇报直通（FB-21）——新工具 supervisor_preset_list 枚举宿主 Agent 预设（元数据+组合模块清单+执行工具启发标记）；session_create/assign(fresh) 预设缺省自动用宿主默认并预检（不存在/激活失败即拒绝）；派发指令显式注入 workspace_id（Worker 汇报不再目录推断）。31 个工具（30 Router + worker_report）、273 个单测。
+当前版本 0.7.6：fresh_session 终局修复（真实宿主探针 VERIFIED）——编程创建会话按四要素配方装配：meta.cwd + meta.agentPreset + agentOptions 初始模型路由 + **setup 回调内 agentPresets.mount**（宿主子代理同款用法；meta.agentPreset 本身不触发装配——宿主源码与端到端探针双重实证）；预设目录适配双面服务（Host 面 remote-client：list/read，Agent 作用域完整面：mount）；探针新增 V8 装配验证与 V9 端到端（followup→inbox→推理→fs 工具→宿主机文件，9 秒实测）。31 个工具、274 个单测。
 
 ## License
 

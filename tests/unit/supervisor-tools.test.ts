@@ -45,6 +45,9 @@ const agentSpies = {
   creates: [] as Array<Record<string, unknown>>,
 };
 
+/** Agent 作用域预设装配记录（fake create 调 setup 时写入）。 */
+const presetMounts: Array<{ agentPreset: string }> = [];
+
 function textOf(message: unknown): string {
   const content = (message as { content?: Array<{ text?: string }> }).content;
   return content?.[0]?.text ?? '';
@@ -66,6 +69,7 @@ async function buildStack(seedProject = true, controllerTiming?: { queueWaitMs?:
   agentSpies.followups.length = 0;
   agentSpies.steers.length = 0;
   agentSpies.creates.length = 0;
+  presetMounts.length = 0;
   const projcacheDir = mkdtempSync(join(tmpdir(), 'projcache-tools-'));
   projcacheDirs.push(projcacheDir);
   writeFileSync(join(projcacheDir, `${WORKER_SESSION}.json`), JSON.stringify({ record: { rows: { title: { val: '切换cloud2bim会话模型为GLM-5.3' } } } }), 'utf8');
@@ -97,6 +101,10 @@ async function buildStack(seedProject = true, controllerTiming?: { queueWaitMs?:
     create: async (options: Record<string, unknown>) => {
       agentSpies.creates.push(options);
       createdSessions.add(String(options['sessionId']));
+      const setup = options['setup'] as ((agentCtx: unknown) => unknown) | undefined;
+      if (setup !== undefined) {
+        await setup({ get: (name: string) => (name === 'agentPresets' ? agentScopedPresets : undefined) });
+      }
       return { agent: liveAgent, dispose: () => undefined };
     },
   };
@@ -120,6 +128,12 @@ async function buildStack(seedProject = true, controllerTiming?: { queueWaitMs?:
       return { id: id ?? 'standard', name: id === 'probe' ? '探针' : '标准' };
     },
     defaultId: 'standard',
+  };
+  const agentScopedPresets = {
+    mount: async (agentCtx: unknown, id?: string) => {
+      presetMounts.push({ agentPreset: id ?? '(default)' });
+      return { id: id ?? 'standard' };
+    },
   };
   const fakeCtx = {
     get: (name: string) =>
@@ -625,6 +639,17 @@ describe('supervisor 工具权限与任务流', () => {
     );
     expect((result as { accepted: boolean }).accepted).toBe(true);
     expect(stack.taskManager.tasks.byId(task.id)?.last_report_at).not.toBeNull();
+  });
+
+  it('0.7.6 预设装配：create 携带 setup 回调，mount 在 Agent 作用域被调用（V8/V9 VERIFIED 配方）', async () => {
+    const stack = await buildStack();
+    const tools = buildSupervisorTools(stack);
+    const createTool = tools.find((t) => t.name === 'supervisor_session_create') as ToolDefinition;
+    const result = await createTool.execute({ workspace_id: 'ws-1' }, execOf(ROUTER_SESSION));
+    expect((result as { ok: boolean }).ok).toBe(true);
+    const createOptions = agentSpies.creates[0] as { setup?: unknown };
+    expect(typeof createOptions.setup).toBe('function');
+    expect(presetMounts).toEqual([{ agentPreset: 'standard' }]);
   });
 
   it('supervisor_model_set 项目锚点：写偏好、目录校验通过，派发时应用 select', async () => {

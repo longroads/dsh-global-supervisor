@@ -214,6 +214,154 @@ export async function runProbe(ctx: Context, configuredDir?: string): Promise<Pr
     return 'probe_echo 已注册（SKIPPED→VERIFIED 待任意会话调用一次后复核）';
   }));
 
+  // --- V8（FB-20/21 根因）：编程创建会话的预设装配 ---
+  // 宿主源码（dsh-subagent/child-agent.js applyChildComposition）实证：meta.agentPreset 只是
+  // 持久化元数据，工具集装配靠创建方在 setup 回调内显式调 agentPresets.mount(agentCtx, id)。
+  // 本探针复刻该用法：创建即销毁（dispose 完整回滚），不留任何会话残留。
+  checks.push(await check('api.agents-create-setup-mount', '编程创建会话的预设装配（V8：agents.create setup 回调 + agentPresets.mount）', async () => {
+    const agents = (await awaitService(ctx, 'agents')) as
+      | { create?: (options: unknown) => Promise<{ dispose?: () => Promise<void> }> }
+      | undefined;
+    if (!agents || typeof agents.create !== 'function') throw new Error('ctx.agents.create 不可用');
+
+    /** agentPresets 最小面（dsh-agent-preset-registry AgentPresetRegistry；非本项目依赖，结构收窄） */
+    interface PresetRegistryLike {
+      list(): Promise<Array<{ id: string; name?: string; broken?: string }>>;
+      readonly defaultId: string;
+      mount(agentCtx: unknown, id?: string): Promise<unknown>;
+      inspectCompositions(ctx?: unknown): Array<{ id: string; modules: Array<{ moduleName: string }> }>;
+    }
+    const presets = (await awaitService(ctx, 'agentPresets')) as PresetRegistryLike | undefined;
+    if (!presets || typeof presets.list !== 'function') {
+      throw new Error('ctx.agentPresets 不可达（服务未装载或 group 隔离）——supervisor_preset_list 与装配路径均不可用');
+    }
+    const roster = await presets.list();
+    const usable = roster.find((p) => p.id === presets.defaultId && p.broken === undefined) ?? roster.find((p) => p.broken === undefined);
+    if (!usable) throw new Error(`预设清单为空或全部 broken：${brief(roster.map((p) => p.id))}`);
+
+    // 安全落点：插件数据目录下的探针临时目录（会话边界校验要求绝对路径）
+    const { mkdir } = await import('node:fs/promises');
+    const { join } = await import('node:path');
+    const probeCwd = join(data.dir, 'probe-tmp');
+    await mkdir(probeCwd, { recursive: true });
+
+    let inspectionDetail = '';
+    const sessionId = `session-probe-mount-${Date.now()}`;
+    const handle = await agents.create({
+      sessionId,
+      meta: { cwd: probeCwd, agentPreset: usable.id },
+      setup: async (agentCtx: unknown) => {
+        const scoped = (agentCtx as { get(name: 'agentPresets'): { mount(a: unknown, id?: string): Promise<unknown>; inspectCompositions?: (ctx?: unknown) => Array<{ id: string; modules: Array<{ moduleName: string }> }> } | undefined }).get('agentPresets');
+        if (scoped === undefined) throw new Error('agentCtx.get("agentPresets") 不可达（Agent 作用域内无预设服务）');
+        const mounted = await scoped.mount(agentCtx, usable.id);
+        // 完整启动后服务面可能是 remote-client 子集（无 inspectCompositions）——mount 返回绑定身份即判据
+        const bound = scoped.inspectCompositions !== undefined ? scoped.inspectCompositions(agentCtx) : [];
+        if (bound.length === 0 && mounted === undefined) throw new Error('mount 未返回绑定身份且 inspectCompositions 为空——装配未生效');
+        inspectionDetail = bound.length > 0
+          ? `绑定 revision=${bound[0]!.id}，模块 ${bound[0]!.modules.length} 个：${bound[0]!.modules.slice(0, 5).map((m) => m.moduleName).join(', ')}${bound[0]!.modules.length > 5 ? '…' : ''}`
+          : `mount 返回绑定身份：${brief(mounted)}（当前服务面无 inspectCompositions——remote-client 形态）`;
+      },
+    });
+    try {
+      await handle.dispose?.();
+    } catch (error) {
+      throw new Error(`装配成功但 dispose 清理失败（会话 ${sessionId} 可能残留）：${error instanceof Error ? error.message : String(error)}`);
+    }
+    return `预设 ${usable.id}${usable.name ? `（${usable.name}）` : ''} 经 setup+mount 装配成功：${inspectionDetail}；会话已销毁`;
+  }));
+
+  // --- V9（FB-20/21 端到端）：装配会话的真实执行能力 ---
+  // 装配验证（V8）只证明工具注册；本检查补最后一环：给装配会话派发最小执行指令，
+  // 轮询宿主机文件真实出现（模型 → 工具调用 → 副作用 全链路）。走宿主默认模型路由；
+  // 模型不可达/推理失败如实报 UNAVAILABLE（端到端依赖外部 LLM，属环境前提非插件缺陷）。
+  checks.push(await check('api.mounted-session-exec-e2e', '装配会话端到端执行（V9：派发写文件指令 → 轮询宿主机副作用）', async () => {
+    const agents = (await awaitService(ctx, 'agents')) as
+      | {
+          create?: (options: unknown) => Promise<{ agent?: { followup?: (message: unknown) => void; whenIdle?: () => Promise<void> }; dispose?: () => Promise<void> }>;
+          get?: (id: unknown) => unknown;
+        }
+      | undefined;
+    if (!agents || typeof agents.create !== 'function') throw new Error('ctx.agents.create 不可用');
+    const presets = (await awaitService(ctx, 'agentPresets')) as
+      | { readonly defaultId: string; list(): Promise<Array<{ id: string; broken?: string }>>; mount(agentCtx: unknown, id?: string): Promise<unknown> }
+      | undefined;
+    if (!presets) throw new Error('ctx.agentPresets 不可达');
+    const roster = await presets.list();
+    const usable = roster.find((p) => p.id === presets.defaultId && p.broken === undefined) ?? roster.find((p) => p.broken === undefined);
+    if (!usable) throw new Error('无可用预设');
+
+    const { mkdir, stat, readFile, rm } = await import('node:fs/promises');
+    const { join } = await import('node:path');
+    const probeCwd = join(data.dir, 'probe-tmp');
+    await mkdir(probeCwd, { recursive: true });
+    const marker = `probe-e2e-${Date.now()}`;
+    const target = join(probeCwd, `${marker}.md`);
+    const sessionId = `session-probe-e2e-${Date.now()}`;
+
+    const { createUserMessage } = await import('@deepseek-ai/dsh-llm');
+    // 创建时显式带模型路由（FB-20③ 同源教训：宿主对新会话不回退默认模型——无路由则消息入箱后永无推理）
+    const llm = (await awaitService(ctx, 'llm', 5, 200)) as { listProviders?: () => Array<{ id: string }>; listModels?: (p: string) => Promise<Array<{ id: string }>> } | undefined;
+    const preferred = ['local-gateway-1panel01', 'zai-coding-cn'];
+    const providers = llm?.listProviders?.() ?? [];
+    const routed = providers.find((p) => preferred.includes(p.id));
+    const provider = routed?.id ?? providers[0]?.id;
+    const model = provider !== undefined ? ((await llm?.listModels?.(provider)) ?? [])[0]?.id : undefined;
+    if (provider === undefined || model === undefined) throw new Error('无法解析模型路由：llm 目录为空——端到端前提缺失');
+    const handle = await agents.create({
+      sessionId,
+      meta: { cwd: probeCwd, agentPreset: usable.id },
+      agentOptions: { provider, model },
+      setup: async (agentCtx: unknown) => {
+        const scoped = (agentCtx as { get(name: 'agentPresets'): { mount(a: unknown, id?: string): Promise<unknown> } | undefined }).get('agentPresets');
+        if (scoped === undefined) throw new Error('agentCtx.get("agentPresets") 不可达');
+        await scoped.mount(agentCtx, usable.id);
+      },
+    });
+    try {
+      // handle 形态显式断言（可选链会静默吞掉 agent 缺失——FB-20③ 教训）
+      const agent = handle.agent;
+      if (agent === undefined || typeof agent.followup !== 'function') {
+        throw new Error(`AgentHandle 形态异常：agent=${String(agent)}，keys=${Object.keys(handle).join('/')}`);
+      }
+      // 先订阅 inbox 事件再触发（诊断正道）：followup 是否真的把消息排进了会话
+      let inboxInserted = false;
+      const offListener = (ctx as unknown as { on: (name: string, cb: (payload: unknown) => void) => () => void }).on('agent/inbox/inserted', (payload) => {
+        const message = (payload as { message?: { turn?: unknown } })?.message ?? payload;
+        if (JSON.stringify(message).includes(sessionId) || inboxInserted === false) inboxInserted = true;
+      });
+      try {
+        agent.followup(createUserMessage({
+          content: [{ type: 'text', text: `请立即用你的文件写入工具在当前工作目录创建文件 ${marker}.md，内容为一行文本：e2e-ok。写完后在回复中回复"done"即可，不要做任何其他事。` }],
+          source: { kind: 'user' },
+        }));
+        const inboxDeadline = Date.now() + 15_000;
+        while (!inboxInserted && Date.now() < inboxDeadline) {
+          await new Promise((resolve) => setTimeout(resolve, 500));
+        }
+        if (!inboxInserted) throw new Error('followup 调用后 15s 内未收到 agent/inbox/inserted 事件——消息未进入会话 inbox（驱动唤醒链路问题，非装配问题）');
+        // 轮询宿主机副作用（模型推理 + 工具调用需要时间；上限 150s）
+        const deadline = Date.now() + 150_000;
+        let fileSeen = false;
+        while (Date.now() < deadline) {
+          await new Promise((resolve) => setTimeout(resolve, 3_000));
+          const st = await stat(target).catch(() => undefined);
+          if (st !== undefined && st.size > 0) {
+            fileSeen = true;
+            break;
+          }
+        }
+        if (!fileSeen) throw new Error(`150s 内未见宿主机副作用：${target} 未出现（消息已入 inbox——模型推理或工具调用环节失败，查宿主日志与模型路由）`);
+        const content = (await readFile(target, 'utf8')).trim();
+        await rm(target, { force: true });
+        return `端到端成功：装配会话（预设 ${usable.id}）真实创建文件并写入"${content}"，全链路（followup→inbox→推理→fs 工具→宿主机副作用）打通；文件已清理`;
+      } finally {
+        offListener();
+      }
+    } finally {
+      await handle.dispose?.().catch(() => undefined);
+    }
+  }));
+
   const report: ProbeReport = {
     ranAt: new Date().toISOString(),
     nodeVersion: process.version,

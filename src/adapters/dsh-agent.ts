@@ -74,10 +74,11 @@ export class DshAgentAdapter {
    * 身份由调用方生成（session-<uuid>）；cwd 必须是受管 workspace 的绝对路径（会话边界校验）。
    * 不持久化 AgentHandle——后续派发走既有 get-or-resume 链路（Host 重启安全）。
    *
-   * FB-20 根因修复：此前编程创建只传 sessionId+cwd——会话按无预设装配（工具集仅只读件，
-   * 无 bash/write/edit，任务天然不可执行）且无初始模型路由（followup 报 no provider/model）。
-   * 现按 CreateAgentOptions 类型基线补齐：meta.agentPreset 装配工具集（TYPE_ONLY，无效名
-   * 由 create 抛错暴露给调用方），agentOptions 固定初始 provider/model。
+   * FB-20/21 根因修复（V8/V9 探针 VERIFIED 配方，四要素缺一不可）：
+   * ① meta.cwd 会话落点；② meta.agentPreset 持久化元数据（记录用）；③ agentOptions 初始模型路由
+   * （宿主对新会话不回退默认模型）；④ setup 回调内 agentCtx.get('agentPresets').mount(agentCtx, id)
+   * ——预设装配的唯一真实入口（宿主 dsh-subagent/applyChildComposition 同款用法；meta.agentPreset
+   * 本身不触发装配）。preset 未提供时不挂 setup（无装配裸会话，仅兼容显式放行场景）。
    * create 返回与 registry 登记之间存在时序窗口（FB-17/18），故 create 后有界轮询直至可见。
    */
   async createSession(
@@ -87,10 +88,12 @@ export class DshAgentAdapter {
   ): Promise<boolean> {
     const agents = await this.agents();
     const route = opts?.provider !== undefined && opts?.model !== undefined ? { provider: opts.provider, model: opts.model } : undefined;
+    const presetId = opts?.agentPreset;
     const createOptions: CreateAgentOptions = {
       sessionId: sessionId as SessionId,
-      meta: { cwd, ...(opts?.agentPreset !== undefined ? { agentPreset: opts.agentPreset } : {}) },
+      meta: { cwd, ...(presetId !== undefined ? { agentPreset: presetId } : {}) },
       ...(route !== undefined ? { agentOptions: route } : {}),
+      ...(presetId !== undefined ? { setup: (agentCtx: Context) => this.mountPreset(agentCtx, presetId) } : {}),
     };
     await agents.create(createOptions);
     const deadline = Date.now() + (opts?.readyTimeoutMs ?? 10_000);
@@ -98,6 +101,25 @@ export class DshAgentAdapter {
       if (agents.get(sessionId as SessionId) !== undefined) return true;
       if (Date.now() >= deadline) return false;
       await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+  }
+
+  /**
+   * Agent 作用域内的预设装配（FB-21 根因）：mount 只在 agentCtx 的服务面上可用
+   * （插件 Host ctx 拿到的是 remote-client 子集——无 mount，实测双面服务）。
+   * mount 失败即抛错（setup throw 会回滚会话创建，无残留）。
+   */
+  private async mountPreset(agentCtx: Context, presetId: string): Promise<void> {
+    const presets = (agentCtx as unknown as {
+      get(name: 'agentPresets'): { mount(ctx: unknown, id?: string): Promise<unknown> } | undefined;
+    }).get('agentPresets');
+    if (presets === undefined) {
+      throw new Error('PRESET_UNAVAILABLE: Agent 作用域内无 agentPresets 服务（宿主未装载预设注册表）');
+    }
+    try {
+      await presets.mount(agentCtx, presetId);
+    } catch (error) {
+      throw new Error(`预设 ${presetId} 装配失败：${error instanceof Error ? error.message : String(error)}`);
     }
   }
 

@@ -55,7 +55,7 @@ Full documentation ships inside the npm package (in Chinese) at `node_modules/ds
 
 ## Status
 
-Version 0.7.5 — preset observability & report passthrough (FB-21): a new `supervisor_preset_list` tool enumerates host agent presets (metadata + composition module roster + an execution-tool heuristic flag); `session_create`/`assign(fresh_session)` default the preset to the host default with preflight validation (unknown or broken presets are rejected up front); dispatch instructions now embed `workspace_id` explicitly (workers no longer infer it from the directory). 31 tools (30 Router + `worker_report`), 273 unit tests.
+Version 0.7.6 — the fresh_session endgame fix (probe-VERIFIED on a real host): programmatically created sessions now follow the four-element recipe — meta.cwd + meta.agentPreset (durable record) + an agentOptions initial model route + **agentPresets.mount inside the setup callback** (the same recipe the host's own subagents use; meta.agentPreset alone never armed tools — proven by host source and an end-to-end probe). The preset catalog adapts to the two-faced service (host ctx gets the remote-client subset with list/read; mount lives only on the agent-scoped face). Probes V8 (arm verification) and V9 (end-to-end: followup→inbox→inference→fs tool→host file, 9s measured) added. 31 tools, 274 unit tests.
 
 ## License
 
