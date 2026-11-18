@@ -12,6 +12,7 @@ import type { SupervisorStack } from '../runtime.js';
 import { WATCHDOG_SETTING_KEYS } from '../services/project-monitor.js';
 import { asRecord, intArg, makeTool, optionalStringArg, stringArg } from './toolkit.js';
 import { jsonSafeDeep } from '../utils/json-safe.js';
+import { DshPresetCatalogAdapter } from '../adapters/dsh-preset.js';
 
 /** Router 守卫：经 RouterIdentity 动态判定（运行时认领制，见 services/router-identity.ts）。 */
 function routerGuard(stack: SupervisorStack) {
@@ -250,9 +251,11 @@ export function buildSupervisorTools(stack: SupervisorStack): ToolDefinition[] {
         if (!workspaceId) return { ok: false, error: `task-not-found-or-no-project: ${taskId}` };
         const path = await resolveWorkspacePath(stack, workspaceId);
         if (path === undefined) return { ok: false, error: `workspace-path-unresolved: ${workspaceId}` };
+        const preset = await resolveAgentPreset(stack, optionalStringArg(record, 'agent_preset'));
+        if (!preset.ok) return { ok: false, error: preset.error };
         try {
           const sessionId = await stack.agentController.createWorkerSession(path, { sessionId: ctx.callerSessionId, role: 'router' }, {
-            ...(optionalStringArg(record, 'agent_preset') !== undefined ? { agentPreset: optionalStringArg(record, 'agent_preset') } : {}),
+            agentPreset: preset.preset.id,
             ...(await resolveSessionModelPref(stack, taskId)),
           });
           override = { sessionId };
@@ -729,6 +732,40 @@ export function buildSupervisorTools(stack: SupervisorStack): ToolDefinition[] {
   }));
 
   tools.push(makeTool({
+    name: 'supervisor_preset_list',
+    description: '枚举宿主 Agent 预设（FB-21：fresh_session/session_create 的 agent_preset 取值来源）。返回每个预设的 id/名称/描述/是否默认/激活状态，以及组合的插件模块清单与"疑似含执行工具"启发标记（模块名匹配 native-command/tools/edit 等——提示非断言，派发执行类任务前应人工确认模块清单）。服务不可达（隔离/未安装）时返回降级提示',
+    parameters: OBJ({}, []),
+    resultSchema: RESULT,
+    guard, guardDeniedMessage: DENIED,
+    timeoutMs: 30_000,
+    handler: async () => {
+      const presets = await stack.presetCatalog.listPresets();
+      if (presets === undefined) {
+        return { ok: false, error: 'agentPresets 服务不可达（可能因 cordis group 隔离或宿主未装载）——无法枚举预设，请人工在 GUI 确认预设名后直接传入 agent_preset' };
+      }
+      const compositions = await stack.presetCatalog.listCompositions();
+      const compositionById = new Map((compositions ?? []).map((c) => [c.id, c]));
+      return {
+        ok: true,
+        count: presets.length,
+        presets: presets.map((p) => {
+          const composition = compositionById.get(p.id);
+          return {
+            id: p.id,
+            name: p.name,
+            description: p.description,
+            is_default: p.isDefault,
+            broken: p.broken,
+            modules: composition?.modules ?? null,
+            execution_hint: composition !== undefined && DshPresetCatalogAdapter.executionHint(composition.modules),
+          };
+        }),
+        hint: 'execution_hint=true 仅表示组合模块名疑似含执行类工具（启发式）；派发落盘任务前请核对 modules 清单',
+      };
+    },
+  }));
+
+  tools.push(makeTool({
     name: 'supervisor_session_create',
     description: '在受管 workspace 下按需创建全新 Worker 会话（FB-10①：会话供给——换绑不再依赖"恰好有另一个空闲会话"的巧合）。返回新 session_id，可用 supervisor_workspace_update 绑定为项目 Worker，或 supervisor_task_assign 的 session_id 参数单任务使用。长寿命会话行为退化（空转/汇报循环）时的标准轮换手段。agent_preset 指定宿主预设（决定新会话的工具集——不传则仅只读工具，无法执行任务，必须传）；模型路由自动解析：项目偏好 → llm 目录默认',
     parameters: OBJ({
@@ -741,10 +778,8 @@ export function buildSupervisorTools(stack: SupervisorStack): ToolDefinition[] {
     handler: async (args, ctx) => {
       const record = asRecord(args);
       const workspaceId = stringArg(record, 'workspace_id');
-      const agentPreset = optionalStringArg(record, 'agent_preset');
-      if (agentPreset === undefined) {
-        return { ok: false, error: 'agent_preset 未提供：编程创建的会话默认无执行类工具（FB-20 实证），任务将无法落盘执行——请传入宿主预设名（含 bash/write/edit 的标准预设）' };
-      }
+      const preset = await resolveAgentPreset(stack, optionalStringArg(record, 'agent_preset'));
+      if (!preset.ok) return { ok: false, error: preset.error };
       const project = await stack.workspaceManager.projectByWorkspace(workspaceId);
       if (!project) return { ok: false, error: `workspace-not-managed: ${workspaceId}（先 supervisor_workspace_adopt 纳管）` };
       const path = await resolveWorkspacePath(stack, workspaceId);
@@ -753,12 +788,14 @@ export function buildSupervisorTools(stack: SupervisorStack): ToolDefinition[] {
         const sessionId = await stack.agentController.createWorkerSession(
           path,
           { sessionId: ctx.callerSessionId, role: 'router' },
-          { agentPreset, ...(await resolveSessionModelPrefByProject(stack, project.projectId)) },
+          { agentPreset: preset.preset.id, ...(await resolveSessionModelPrefByProject(stack, project.projectId)) },
         );
         return {
           ok: true,
           session_id: sessionId,
           workspace_id: workspaceId,
+          preset: { id: preset.preset.id, source: preset.preset.source, name: preset.preset.name, description: preset.preset.description },
+          ...(preset.preset.source === 'default' ? { warning: '使用宿主默认预设——若 Worker 汇报无执行工具，请 supervisor_preset_list 选含执行模块的预设后重建' } : {}),
           hints: [
             `绑定为项目 Worker：supervisor_workspace_update（workspace_id=${workspaceId}, worker_session_id=${sessionId}）`,
             '或单任务使用：supervisor_task_assign（session_id 参数）——任务描述需自包含，成果写入磁盘文件',
@@ -883,6 +920,34 @@ export function buildSupervisorTools(stack: SupervisorStack): ToolDefinition[] {
   }));
 
   return tools;
+}
+
+/**
+ * 解析新建会话预设（FB-21②）：显式传入 → resolve 预检（不存在/激活失败即拒绝）；
+ * 未传 → 宿主默认预设（同样预检）。服务不可达时显式值放行（无法预检）、缺省值拒绝。
+ */
+async function resolveAgentPreset(stack: SupervisorStack, explicit: string | undefined): Promise<
+  { ok: true; preset: { id: string; source: 'explicit' | 'default'; name: string | null; description: string | null } } | { ok: false; error: string }
+> {
+  const id = explicit ?? (await stack.presetCatalog.defaultId());
+  if (id === undefined) {
+    return { ok: false, error: 'agent_preset 未提供且宿主默认预设不可达（agentPresets 服务隔离/未装载）——请显式传入预设名（GUI 创建会话所用预设）' };
+  }
+  const resolved = await stack.presetCatalog.resolvePreset(id);
+  if (resolved === undefined) {
+    // 服务在 defaultId 之后失联：显式值无法预检，放行（创建报错会透传宿主原因）
+    if (explicit !== undefined) {
+      return { ok: true, preset: { id: explicit, source: 'explicit', name: null, description: null } };
+    }
+    return { ok: false, error: `预设 ${id} 无法预检（服务不可达）——请显式传入 agent_preset` };
+  }
+  if (!resolved.found) {
+    return { ok: false, error: `预设不存在：${id}（supervisor_preset_list 可枚举有效预设）` };
+  }
+  if (resolved.broken !== null) {
+    return { ok: false, error: `预设激活失败：${id}（${resolved.broken}）——换用其他预设` };
+  }
+  return { ok: true, preset: { id, source: explicit !== undefined ? 'explicit' : 'default', name: resolved.name, description: resolved.description } };
 }
 
 /** 解析受管 workspace 的本地路径（listWorkspaceOverview 一次查询；未纳管的 workspace 返回 undefined）。 */

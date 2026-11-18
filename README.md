@@ -55,7 +55,7 @@ Full documentation ships inside the npm package (in Chinese) at `node_modules/ds
 
 ## Status
 
-Version 0.7.4 — fresh_session root-cause fix (session-trace evidence, FB-16~20): programmatically created sessions now carry a host agent preset (`agent_preset`, decides the tool set) and an initial model route (task/project preference → llm-catalog fallback); `worker_report` access extended to task-scoped executor sessions; a 90s dispatch-queue wait cap plus a 30s post-dispatch liveness check (eliminates the 20-31-minute permit-blackhole dispatch delay and shrinks idle-spin black holes to seconds); hot-reload timer-leak fix via the `ctx.effect` cleanup chain; watchdog re-checks task state before nudging or pushing (zero side effects on terminal tasks). 30 tools, 271 unit tests.
+Version 0.7.5 — preset observability & report passthrough (FB-21): a new `supervisor_preset_list` tool enumerates host agent presets (metadata + composition module roster + an execution-tool heuristic flag); `session_create`/`assign(fresh_session)` default the preset to the host default with preflight validation (unknown or broken presets are rejected up front); dispatch instructions now embed `workspace_id` explicitly (workers no longer infer it from the directory). 31 tools (30 Router + `worker_report`), 273 unit tests.
 
 ## License
 

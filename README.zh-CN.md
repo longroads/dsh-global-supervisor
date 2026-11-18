@@ -54,7 +54,7 @@ dsh plugin --profile desktop update dsh-global-supervisor
 
 ## 状态
 
-当前版本 0.7.4：fresh_session 根因修复（会话轨迹实证 FB-16~20）——编程创建会话补齐宿主预设（agent_preset，决定工具集）与初始模型路由（任务/项目偏好→llm 目录回退）；worker_report 权限扩展到任务执行会话；派发队列等待上限 90s + 派发后 30s 活性校验（消灭许可黑洞导致的 20-31 分钟派发延迟与分钟级空转黑洞）；热重载定时器泄漏修复（ctx.effect 清理链）；watchdog 催告/推送前任务状态复查（终态任务零副作用）。30 个工具、271 个单测。
+当前版本 0.7.5：预设可观测与汇报直通（FB-21）——新工具 supervisor_preset_list 枚举宿主 Agent 预设（元数据+组合模块清单+执行工具启发标记）；session_create/assign(fresh) 预设缺省自动用宿主默认并预检（不存在/激活失败即拒绝）；派发指令显式注入 workspace_id（Worker 汇报不再目录推断）。31 个工具（30 Router + worker_report）、273 个单测。
 
 ## License
 

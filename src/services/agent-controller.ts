@@ -159,7 +159,7 @@ export class AgentController {
     try {
       this.taskManager.markDispatched(taskId, workerSession, new Date(Date.now() + DEFAULT_TIMEOUT_MS).toISOString());
       const modelPref = parseModelPref(task.model_pref_json) ?? parseModelPref(project?.model_pref_json);
-      await this.agents.dispatch(workerSession, this.buildInstruction(task), modelPref);
+      await this.agents.dispatch(workerSession, this.buildInstruction(task, project?.workspace_id), modelPref);
       this.permits.set(taskId, permit);
       this.scheduleLivenessCheck(taskId, workerSession);
       return { dispatched: true, reason: 'ok', taskId };
@@ -274,8 +274,8 @@ export class AgentController {
     return this.permits.size;
   }
 
-  /** 组装任务指令文本（分类标注 + 验收契约 + 心跳契约 + 相关记忆注入，0.7.2）。 */
-  private buildInstruction(task: { id: string; title: string; description: string; category: string | null; acceptance: string | null }): string {
+  /** 组装任务指令文本（分类标注 + 验收契约 + 心跳契约 + 相关记忆注入，0.7.2；workspace_id 注入 0.7.5/FB-21③）。 */
+  private buildInstruction(task: { id: string; title: string; description: string; category: string | null; acceptance: string | null }, workspaceId?: string, cwd?: string): string {
     const heartbeatMinutes = Math.max(1, Math.round(this.heartbeatIntervalMs(task.category) / 60000));
     const memories = this.relevantMemories(task.title, task.description);
     return [
@@ -284,6 +284,9 @@ export class AgentController {
       task.description !== '' ? `说明：${task.description}` : '',
       ...(task.acceptance !== null
         ? [`验收条件：${task.acceptance}——完成时须在 worker_report 的 evidence 字段附佐证（结果文件绝对路径或关键输出摘要），系统将据此核验`]
+        : []),
+      ...(workspaceId !== undefined
+        ? [`工作区：workspace_id=${workspaceId}${cwd !== undefined ? `（本地路径 ${cwd}，产出文件写入该目录树）` : ''}——worker_report 的 workspace_id 字段使用此值`]
         : []),
       '',
       '执行要求：完成或状态变化时调用 worker_report 工具汇报（workspace_id/task_id/status/progress/summary），',

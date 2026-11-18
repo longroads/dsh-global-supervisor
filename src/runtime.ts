@@ -6,6 +6,7 @@ import type { Context } from '@deepseek-ai/cordis';
 import { DshAgentAdapter } from './adapters/dsh-agent.js';
 import { DshImNotifierAdapter } from './adapters/dsh-im-notifier.js';
 import { DshLlmCatalogAdapter } from './adapters/dsh-llm-catalog.js';
+import { DshPresetCatalogAdapter } from './adapters/dsh-preset.js';
 import { DshScheduleAdapter } from './adapters/dsh-schedule.js';
 import { DshSessionAdapter } from './adapters/dsh-session.js';
 import { DshWorkspaceAdapter } from './adapters/dsh-workspace.js';
@@ -42,6 +43,7 @@ export interface SupervisorStack {
   routerIdentity: RouterIdentity;
   routingRules: RoutingRuleRepository;
   llmCatalog: DshLlmCatalogAdapter;
+  presetCatalog: DshPresetCatalogAdapter;
   updateChecker: UpdateChecker;
 }
 
@@ -109,6 +111,7 @@ export async function createStack(ctx: Context, options: { dataDir?: string; rou
     routerIdentity,
     routingRules: new RoutingRuleRepository(db),
     llmCatalog: new DshLlmCatalogAdapter(ctx),
+    presetCatalog: new DshPresetCatalogAdapter(ctx),
     updateChecker: new UpdateChecker({ enabled: options.updateCheck !== false }),
   };
 }

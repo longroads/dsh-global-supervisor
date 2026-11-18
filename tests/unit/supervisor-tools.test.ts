@@ -6,6 +6,7 @@ import type { Context } from '@deepseek-ai/cordis';
 import type { ToolDefinition, ToolRunContext } from '@deepseek-ai/dsh-tools';
 import { openDatabase } from '../../src/database/connection.js';
 import { DshAgentAdapter } from '../../src/adapters/dsh-agent.js';
+import { DshPresetCatalogAdapter } from '../../src/adapters/dsh-preset.js';
 import { DshScheduleAdapter } from '../../src/adapters/dsh-schedule.js';
 import { DshSessionAdapter } from '../../src/adapters/dsh-session.js';
 import { DshWorkspaceAdapter } from '../../src/adapters/dsh-workspace.js';
@@ -103,9 +104,26 @@ async function buildStack(seedProject = true, controllerTiming?: { queueWaitMs?:
     listProviders: () => [{ id: 'p1', name: 'Provider One' }],
     listModels: async (provider: string) => (provider === 'p1' ? [{ id: 'm1', name: 'Model One' }, { id: 'm2', name: 'Model Two' }] : []),
   };
+  const presetService = {
+    list: async () => [
+      { id: 'standard', name: '标准', description: '含执行工具' },
+      { id: 'probe', name: '探针' },
+      { id: 'broken-x', name: '坏预设', broken: 'activation failed' },
+    ],
+    compositionInventory: async () => [
+      { id: 'standard', isDefault: true, rows: [{ moduleName: '@deepseek-ai/dsh-native-command', enabled: true }, { moduleName: '@deepseek-ai/dsh-tools', enabled: true }] },
+      { id: 'probe', isDefault: false, rows: [{ moduleName: 'working-directory', enabled: true }] },
+    ],
+    resolve: async (id?: string) => {
+      if (id === 'broken-x') return { id, broken: 'activation failed' };
+      if (id !== undefined && id !== 'standard' && id !== 'probe') throw new Error('not found');
+      return { id: id ?? 'standard', name: id === 'probe' ? '探针' : '标准' };
+    },
+    defaultId: 'standard',
+  };
   const fakeCtx = {
     get: (name: string) =>
-      name === 'workspaceRegistry' ? registry : name === 'agents' ? agentsService : name === 'llm' ? llmService : {},
+      name === 'workspaceRegistry' ? registry : name === 'agents' ? agentsService : name === 'llm' ? llmService : name === 'agentPresets' ? presetService : {},
   } as unknown as Context;
   const agentAdapter = new DshAgentAdapter(fakeCtx);
   const taskManager = new TaskManager(db);
@@ -132,6 +150,7 @@ async function buildStack(seedProject = true, controllerTiming?: { queueWaitMs?:
     routerIdentity: new RouterIdentity(db, ROUTER_SESSION),
     routingRules: new RoutingRuleRepository(db),
     llmCatalog: new DshLlmCatalogAdapter(fakeCtx),
+    presetCatalog: new DshPresetCatalogAdapter(fakeCtx),
     // 派发目标用空实现替身：工具层测试不依赖真实 Agent 服务（派发失败会降级 pending，掩盖路由结果）
     eventRouter: new EventRouter(db, { dispatch: async () => undefined }, () => ROUTER_SESSION),
   };
@@ -495,27 +514,59 @@ describe('supervisor 工具权限与任务流', () => {
     expect(() => JSON.stringify(result)).not.toThrow();
   });
 
-  it('supervisor_session_create：受管 workspace 下创建新会话（FB-20：preset 必填 + 模型路由回退）', async () => {
+  it('supervisor_session_create：预设解析（FB-21：缺省用宿主默认 + 预检 broken/不存在）', async () => {
     const stack = await buildStack();
     const tools = buildSupervisorTools(stack);
     const createTool = tools.find((t) => t.name === 'supervisor_session_create') as ToolDefinition;
-    // 缺 preset 直接拒绝（无执行工具的会话任务不可执行，宁可不建）
-    const noPreset = await createTool.execute({ workspace_id: 'ws-1' }, execOf(ROUTER_SESSION));
-    expect((noPreset as { ok: boolean }).ok).toBe(false);
-    expect((noPreset as { error: string }).error).toContain('agent_preset');
-    const result = await createTool.execute({ workspace_id: 'ws-1', agent_preset: 'standard' }, execOf(ROUTER_SESSION));
-    expect((result as { ok: boolean }).ok).toBe(true);
-    expect((result as { session_id: string }).session_id).toMatch(/^session-/);
-    expect((result as { workspace_id: string }).workspace_id).toBe('ws-1');
-    const createOptions = agentSpies.creates[0] as { meta?: { cwd?: string; agentPreset?: string }; agentOptions?: { provider?: string; model?: string } };
-    expect(createOptions.meta?.cwd).toBe('E:\\proj\\p1');
+    // 不传 preset：自动用宿主默认（standard）并带 warning 提示
+    const byDefault = await createTool.execute({ workspace_id: 'ws-1' }, execOf(ROUTER_SESSION));
+    expect((byDefault as { ok: boolean }).ok).toBe(true);
+    expect((byDefault as { preset: { id: string; source: string } }).preset).toMatchObject({ id: 'standard', source: 'default' });
+    expect((byDefault as { warning?: string }).warning).toBeDefined();
+    // 显式传合法 preset：source=explicit，无 warning
+    const explicit = await createTool.execute({ workspace_id: 'ws-1', agent_preset: 'probe' }, execOf(ROUTER_SESSION));
+    expect((explicit as { preset: { id: string; source: string } }).preset).toMatchObject({ id: 'probe', source: 'explicit' });
+    expect((explicit as { warning?: string }).warning).toBeUndefined();
+    // broken 预设拒绝（附原因）
+    const broken = await createTool.execute({ workspace_id: 'ws-1', agent_preset: 'broken-x' }, execOf(ROUTER_SESSION));
+    expect((broken as { ok: boolean }).ok).toBe(false);
+    expect((broken as { error: string }).error).toContain('激活失败');
+    // 不存在的预设拒绝
+    const missing = await createTool.execute({ workspace_id: 'ws-1', agent_preset: 'nope' }, execOf(ROUTER_SESSION));
+    expect((missing as { ok: boolean }).ok).toBe(false);
+    expect((missing as { error: string }).error).toContain('预设不存在');
+    // create 收到 agentPreset + 模型路由（项目无偏好 → 目录回退 p1/m1）
+    const createOptions = agentSpies.creates[0] as { meta?: { agentPreset?: string }; agentOptions?: { provider: string; model: string } };
     expect(createOptions.meta?.agentPreset).toBe('standard');
-    // 无项目偏好时回退 llm 目录首个可用模型（fake：p1/m1）
     expect(createOptions.agentOptions).toEqual({ provider: 'p1', model: 'm1' });
-    // 未纳管 workspace 拒绝
-    const rejected = await createTool.execute({ workspace_id: 'ws-unknown', agent_preset: 'standard' }, execOf(ROUTER_SESSION));
-    expect((rejected as { ok: boolean }).ok).toBe(false);
-    expect((rejected as { error: string }).error).toContain('workspace-not-managed');
+  });
+
+  it('supervisor_preset_list：枚举预设与组合模块清单，执行工具启发标记（FB-21①）', async () => {
+    const stack = await buildStack();
+    const tools = buildSupervisorTools(stack);
+    const listTool = tools.find((t) => t.name === 'supervisor_preset_list') as ToolDefinition;
+    const result = (await listTool.execute({}, execOf(ROUTER_SESSION))) as {
+      ok: boolean; count: number;
+      presets: Array<{ id: string; is_default: boolean; modules: string[] | null; execution_hint: boolean; broken: string | null }>;
+    };
+    expect(result.ok).toBe(true);
+    expect(result.count).toBe(3);
+    const standard = result.presets.find((p) => p.id === 'standard');
+    const probe = result.presets.find((p) => p.id === 'probe');
+    expect(standard?.is_default).toBe(true);
+    expect(standard?.execution_hint).toBe(true);
+    expect(standard?.modules).toContain('@deepseek-ai/dsh-native-command');
+    expect(probe?.execution_hint).toBe(false);
+    expect(result.presets.find((p) => p.id === 'broken-x')?.broken).toBe('activation failed');
+  });
+
+  it('FB-21③ 派发指令携带 workspace_id（Worker 汇报不再目录推断）', async () => {
+    const stack = await buildStack();
+    const task = stack.taskManager.createTask({ projectId: 'proj-1', title: 'SR-IOV 部署' }, { sessionId: ROUTER_SESSION, role: 'router' });
+    stack.taskManager.enqueue(task.id, { sessionId: ROUTER_SESSION, role: 'router' });
+    const dispatch = await stack.agentController.dispatchTask(task.id);
+    expect(dispatch.dispatched).toBe(true);
+    expect(agentSpies.followups.at(-1)).toContain('workspace_id=ws-1');
   });
 
   it('FB-18 队列等待上限：许可被占时排队超时返回 queue-timeout，迟到许可被归还不泄漏', async () => {
