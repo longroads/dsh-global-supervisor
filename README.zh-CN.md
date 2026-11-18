@@ -54,7 +54,7 @@ dsh plugin --profile desktop update dsh-global-supervisor
 
 ## 状态
 
-当前版本 0.7.3：验证期反馈修复——FB-14 工具输出 JSON 安全清洗（剥 ANSI/控制字符/孤立代理+截断，入库与出库双层，task_report 不再因脏字符整体失败）；FB-17 fresh 会话创建后就绪轮询（消除 create→dispatch 时序竞争导致的系统性空转）；FB-15 派发指令防空转契约（首步必须产生宿主机可见副作用）。fresh 会话 workspace 归属与游离会话事件入流水为宿主 API 缺口（详见 docs/API_COMPATIBILITY.md）。30 个工具（29 Router + worker_report）、266 个单测。
+当前版本 0.7.4：fresh_session 根因修复（会话轨迹实证 FB-16~20）——编程创建会话补齐宿主预设（agent_preset，决定工具集）与初始模型路由（任务/项目偏好→llm 目录回退）；worker_report 权限扩展到任务执行会话；派发队列等待上限 90s + 派发后 30s 活性校验（消灭许可黑洞导致的 20-31 分钟派发延迟与分钟级空转黑洞）；热重载定时器泄漏修复（ctx.effect 清理链）；watchdog 催告/推送前任务状态复查（终态任务零副作用）。30 个工具、271 个单测。
 
 ## License
 

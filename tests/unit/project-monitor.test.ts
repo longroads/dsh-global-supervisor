@@ -219,6 +219,47 @@ describe('ProjectMonitor 四分类增强（Phase 5-C）', () => {
     expect(notified).toHaveLength(1);
     expect(notified[0]?.severity).toBe('critical');
   });
+
+  it('FB-19：getAgent 慢异步期间任务被取消 → 不催告不告警不推送（终态任务零副作用）', async () => {
+    const notified: Notice[] = [];
+    const cancelOnGet = {
+      get: async () => {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        return undefined;
+      },
+      list: () => [],
+      resume: async () => ({ agent: undefined }),
+    };
+    const db = await openDatabase(':memory:');
+    const fakeCtx = { get: (name: string) => (name === 'agents' ? cancelOnGet : {}) } as unknown as Context;
+    const manager = new TaskManager(db);
+    manager.projects.create({ id: 'proj-1', workspaceId: 'ws-1', name: 'P1', workerSessionId: WORKER });
+    const adapter = new DshAgentAdapter(fakeCtx);
+    const controller = new AgentController(adapter, manager, db);
+    const monitor = new ProjectMonitor(manager, controller, undefined, {
+      agents: adapter,
+      idleStaleMs: 1_000,
+      startingTimeoutMs: 60 * 60 * 1000,
+      settings: fakeSettings({ 'watchdog.progressPushIntervalMs': 1 }),
+      notify: async (message, severity) => {
+        notified.push({ message, severity });
+        return true;
+      },
+    });
+    const taskId = runningTask(manager, futureIso());
+    manager.applyWorkerReport(parseWorkerReport({ workspace_id: 'ws-1', task_id: taskId, status: 'running', progress: 50 }), WORKER);
+    db.prepare('UPDATE tasks SET last_report_at = ? WHERE id = ?').run(pastIso(), taskId);
+    // getAgent 返回前取消任务：模拟"取消发生在扫描进行中"（实测 21:35 取消后仍收催告的场景）
+    void (async () => {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      manager.cancel(taskId, { role: 'router', sessionId: 'session-router' });
+    })();
+    const scan = await monitor.scanOnce();
+    expect(manager.tasks.byId(taskId)?.status).toBe('canceled');
+    expect(scan.idleSuspects).toEqual([]);
+    expect(scan.lost).toEqual([]);
+    expect(notified).toHaveLength(0);
+  });
 });
 
 describe('ProjectMonitor 看门狗修复（FB-2/FB-4/FB-7）', () => {

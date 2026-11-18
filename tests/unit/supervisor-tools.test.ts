@@ -59,7 +59,7 @@ afterEach(() => {
 });
 
 /** 手工组装服务栈（内存库 + fake ctx；workspaceRegistry/agents/llm 提供假实现；projcache 注入 tmp 目录）。 */
-async function buildStack(seedProject = true): Promise<SupervisorStack> {
+async function buildStack(seedProject = true, controllerTiming?: { queueWaitMs?: number; livenessCheckMs?: number }): Promise<SupervisorStack> {
   const db = await openDatabase(':memory:');
   agentSpies.selects.length = 0;
   agentSpies.followups.length = 0;
@@ -112,7 +112,7 @@ async function buildStack(seedProject = true): Promise<SupervisorStack> {
   if (seedProject) {
     taskManager.projects.create({ id: 'proj-1', workspaceId: 'ws-1', name: 'P1', workerSessionId: WORKER_SESSION });
   }
-  const agentController = new AgentController(agentAdapter, taskManager, db);
+  const agentController = new AgentController(agentAdapter, taskManager, db, 1, controllerTiming);
   const monitor = new ProjectMonitor(taskManager, agentController, undefined, { settings: new PluginSettingRepository(db) });
   return {
     db,
@@ -495,19 +495,85 @@ describe('supervisor 工具权限与任务流', () => {
     expect(() => JSON.stringify(result)).not.toThrow();
   });
 
-  it('supervisor_session_create：受管 workspace 下创建新会话并返回使用提示（FB-10①）', async () => {
+  it('supervisor_session_create：受管 workspace 下创建新会话（FB-20：preset 必填 + 模型路由回退）', async () => {
     const stack = await buildStack();
     const tools = buildSupervisorTools(stack);
     const createTool = tools.find((t) => t.name === 'supervisor_session_create') as ToolDefinition;
-    const result = await createTool.execute({ workspace_id: 'ws-1' }, execOf(ROUTER_SESSION));
+    // 缺 preset 直接拒绝（无执行工具的会话任务不可执行，宁可不建）
+    const noPreset = await createTool.execute({ workspace_id: 'ws-1' }, execOf(ROUTER_SESSION));
+    expect((noPreset as { ok: boolean }).ok).toBe(false);
+    expect((noPreset as { error: string }).error).toContain('agent_preset');
+    const result = await createTool.execute({ workspace_id: 'ws-1', agent_preset: 'standard' }, execOf(ROUTER_SESSION));
     expect((result as { ok: boolean }).ok).toBe(true);
     expect((result as { session_id: string }).session_id).toMatch(/^session-/);
     expect((result as { workspace_id: string }).workspace_id).toBe('ws-1');
-    expect((agentSpies.creates[0]?.['meta'] as { cwd?: string })?.cwd).toBe('E:\\proj\\p1');
+    const createOptions = agentSpies.creates[0] as { meta?: { cwd?: string; agentPreset?: string }; agentOptions?: { provider?: string; model?: string } };
+    expect(createOptions.meta?.cwd).toBe('E:\\proj\\p1');
+    expect(createOptions.meta?.agentPreset).toBe('standard');
+    // 无项目偏好时回退 llm 目录首个可用模型（fake：p1/m1）
+    expect(createOptions.agentOptions).toEqual({ provider: 'p1', model: 'm1' });
     // 未纳管 workspace 拒绝
-    const rejected = await createTool.execute({ workspace_id: 'ws-unknown' }, execOf(ROUTER_SESSION));
+    const rejected = await createTool.execute({ workspace_id: 'ws-unknown', agent_preset: 'standard' }, execOf(ROUTER_SESSION));
     expect((rejected as { ok: boolean }).ok).toBe(false);
     expect((rejected as { error: string }).error).toContain('workspace-not-managed');
+  });
+
+  it('FB-18 队列等待上限：许可被占时排队超时返回 queue-timeout，迟到许可被归还不泄漏', async () => {
+    const stack = await buildStack(true, { queueWaitMs: 100 });
+    const first = stack.taskManager.createTask({ projectId: 'proj-1', title: 'A' }, { sessionId: ROUTER_SESSION, role: 'router' });
+    const second = stack.taskManager.createTask({ projectId: 'proj-1', title: 'B' }, { sessionId: ROUTER_SESSION, role: 'router' });
+    stack.taskManager.enqueue(first.id, { sessionId: ROUTER_SESSION, role: 'router' });
+    stack.taskManager.enqueue(second.id, { sessionId: ROUTER_SESSION, role: 'router' });
+    const dispatched = await stack.agentController.dispatchTask(first.id);
+    expect(dispatched.dispatched).toBe(true);
+    expect(stack.agentController.permitsCount()).toBe(1);
+    // B 排队等待许可，100ms 超时放弃（许可黑洞不再无限等待 10-30 分钟）
+    const blocked = await stack.agentController.dispatchTask(second.id);
+    expect(blocked.dispatched).toBe(false);
+    expect(blocked.reason).toBe('queue-timeout');
+    expect(stack.taskManager.tasks.byId(second.id)?.status).toBe('queued');
+    // A 终态释放许可 → B 的迟到许可（race 竞态）立即归还：第三个任务可正常派发
+    stack.agentController.applyWorkerReport(
+      { workspaceId: 'ws-1', taskId: first.id, status: 'completed', blockers: [], needHuman: false, suggestedActions: [], summary: 'done' },
+      WORKER_SESSION,
+    );
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(stack.agentController.permitsCount()).toBe(0);
+    const third = stack.taskManager.createTask({ projectId: 'proj-1', title: 'C' }, { sessionId: ROUTER_SESSION, role: 'router' });
+    stack.taskManager.enqueue(third.id, { sessionId: ROUTER_SESSION, role: 'router' });
+    const thirdDispatch = await stack.agentController.dispatchTask(third.id);
+    expect(thirdDispatch.dispatched).toBe(true);
+  });
+
+  it('FB-18/20 活性校验：派发后会话从未注册 → 快速失败释放许可并重排（不等 10 分钟启动窗口）', async () => {
+    const stack = await buildStack(true, { livenessCheckMs: 50 });
+    const task = stack.taskManager.createTask({ projectId: 'proj-1', title: 'T' }, { sessionId: ROUTER_SESSION, role: 'router' });
+    stack.taskManager.enqueue(task.id, { sessionId: ROUTER_SESSION, role: 'router' });
+    // 会话不在 fake registry（get 恒 miss）、resume 成功——模拟"装配缺陷的编程创建会话"
+    const dispatch = await stack.agentController.dispatchTask(task.id, { sessionId: 'session-cold' });
+    expect(dispatch.dispatched).toBe(true);
+    expect(stack.taskManager.tasks.byId(task.id)?.status).toBe('running');
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    // 活性校验触发：判启动超时 → 重试排队 → 许可释放，全程秒级
+    expect(stack.taskManager.tasks.byId(task.id)?.status).toBe('queued');
+    expect(stack.agentController.permitsCount()).toBe(0);
+    const abortAudit = stack.taskManager.audit.byAction('task.dispatch_abort');
+    expect(abortAudit.length).toBe(1);
+  });
+
+  it('FB-20② 任务执行会话可调用 worker_report（guard 白名单扩展）', async () => {
+    const stack = await buildStack();
+    const report = buildWorkerReportTool(stack);
+    const task = stack.taskManager.createTask({ projectId: 'proj-1', title: 'T' }, { sessionId: ROUTER_SESSION, role: 'router' });
+    stack.taskManager.enqueue(task.id, { sessionId: ROUTER_SESSION, role: 'router' });
+    const dispatch = await stack.agentController.dispatchTask(task.id, { sessionId: 'session-task-x' });
+    expect(dispatch.dispatched).toBe(true);
+    const result = await report.execute(
+      { workspace_id: 'ws-1', task_id: task.id, status: 'running', progress: 10, summary: '任务级会话首报' },
+      execOf('session-task-x'),
+    );
+    expect((result as { accepted: boolean }).accepted).toBe(true);
+    expect(stack.taskManager.tasks.byId(task.id)?.last_report_at).not.toBeNull();
   });
 
   it('supervisor_model_set 项目锚点：写偏好、目录校验通过，派发时应用 select', async () => {

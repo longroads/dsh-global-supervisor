@@ -22,6 +22,24 @@ describe('ModelQueue 并发控制', () => {
     expect(queue.stats()).toEqual({ running: 0, waiting: 0 });
   });
 
+  it('FB-18 cancel：取消排队项后，许可释放不再放行已取消任务', async () => {
+    const queue = new ModelQueue(1);
+    const h1 = await queue.submit({ id: 'a', priority: 5 });
+    const cancelled = queue.submit({ id: 'b', priority: 5 });
+    expect(queue.cancel('b')).toBe(true);
+    h1.release();
+    await sleep(20);
+    // 已取消的 b 不获许可；cancel 返回 false（不在等待中也不持许可）
+    expect(queue.stats().running).toBe(0);
+    expect(queue.cancel('b')).toBe(false);
+    // 迟到的许可由调用方归还（dispatchTask 的 race 分支负责），队列保持排空
+    const next = queue.submit({ id: 'c', priority: 5 });
+    const h3 = await next;
+    expect(h3.held).toBe(true);
+    h3.release();
+    void cancelled;
+  });
+
   it('高优先级插队：等待中的高优先出队，运行中的不被抢占', async () => {
     const queue = new ModelQueue(1);
     const low = queue.submit({ id: 'low', priority: 1 });

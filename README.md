@@ -55,7 +55,7 @@ Full documentation ships inside the npm package (in Chinese) at `node_modules/ds
 
 ## Status
 
-Version 0.7.3 — verification-feedback fixes: FB-14 JSON-safe text sanitization for tool outputs (strips ANSI sequences/control chars/lone surrogates + length caps, applied at both ingest and egress — `supervisor_task_report` no longer fails wholesale on dirty log excerpts); FB-17 fresh-session readiness polling after `agents.create` (removes the create→dispatch timing race that caused systematic idle-spinning); FB-15 anti-idle dispatch contract (the first action must produce a host-visible side effect before any "started" report). Fresh-session workspace affinity and orphan-session event ingestion remain host API gaps (see docs/API_COMPATIBILITY.md). 30 tools (29 Router + `worker_report`), 266 unit tests.
+Version 0.7.4 — fresh_session root-cause fix (session-trace evidence, FB-16~20): programmatically created sessions now carry a host agent preset (`agent_preset`, decides the tool set) and an initial model route (task/project preference → llm-catalog fallback); `worker_report` access extended to task-scoped executor sessions; a 90s dispatch-queue wait cap plus a 30s post-dispatch liveness check (eliminates the 20-31-minute permit-blackhole dispatch delay and shrinks idle-spin black holes to seconds); hot-reload timer-leak fix via the `ctx.effect` cleanup chain; watchdog re-checks task state before nudging or pushing (zero side effects on terminal tasks). 30 tools, 271 unit tests.
 
 ## License
 

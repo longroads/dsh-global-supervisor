@@ -4,7 +4,7 @@
  * 铁律：不持久化 Agent 句柄——每次派发即时解析（Host 重启安全）。
  */
 import type { Context } from '@deepseek-ai/cordis';
-import type { Agent, AgentCancelCause, AgentRegistry, ModelSelection } from '@deepseek-ai/dsh-agent';
+import type { Agent, AgentCancelCause, AgentRegistry, CreateAgentOptions, ModelSelection } from '@deepseek-ai/dsh-agent';
 import type { SessionId } from '@deepseek-ai/dsh-session';
 import { awaitService } from './host-services.js';
 
@@ -74,13 +74,25 @@ export class DshAgentAdapter {
    * 身份由调用方生成（session-<uuid>）；cwd 必须是受管 workspace 的绝对路径（会话边界校验）。
    * 不持久化 AgentHandle——后续派发走既有 get-or-resume 链路（Host 重启安全）。
    *
-   * FB-17：create 返回与 registry 登记之间存在时序窗口——若派发此刻到达，ensureAgent 的
-   * get 未命中会落到对零历史会话 resume 的冷路径（装配路径完全不同，实测系统性空转）。
-   * 故 create 后有界轮询直至 registry 可见，返回就绪结果；调用方据此留审计。
+   * FB-20 根因修复：此前编程创建只传 sessionId+cwd——会话按无预设装配（工具集仅只读件，
+   * 无 bash/write/edit，任务天然不可执行）且无初始模型路由（followup 报 no provider/model）。
+   * 现按 CreateAgentOptions 类型基线补齐：meta.agentPreset 装配工具集（TYPE_ONLY，无效名
+   * 由 create 抛错暴露给调用方），agentOptions 固定初始 provider/model。
+   * create 返回与 registry 登记之间存在时序窗口（FB-17/18），故 create 后有界轮询直至可见。
    */
-  async createSession(sessionId: string, cwd: string, opts?: { readyTimeoutMs?: number }): Promise<boolean> {
+  async createSession(
+    sessionId: string,
+    cwd: string,
+    opts?: { readyTimeoutMs?: number; agentPreset?: string; provider?: string; model?: string },
+  ): Promise<boolean> {
     const agents = await this.agents();
-    await agents.create({ sessionId: sessionId as SessionId, meta: { cwd } });
+    const route = opts?.provider !== undefined && opts?.model !== undefined ? { provider: opts.provider, model: opts.model } : undefined;
+    const createOptions: CreateAgentOptions = {
+      sessionId: sessionId as SessionId,
+      meta: { cwd, ...(opts?.agentPreset !== undefined ? { agentPreset: opts.agentPreset } : {}) },
+      ...(route !== undefined ? { agentOptions: route } : {}),
+    };
+    await agents.create(createOptions);
     const deadline = Date.now() + (opts?.readyTimeoutMs ?? 10_000);
     for (;;) {
       if (agents.get(sessionId as SessionId) !== undefined) return true;

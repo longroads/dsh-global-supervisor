@@ -57,6 +57,22 @@ export class ModelQueue {
     });
   }
 
+  /**
+   * 取消某任务的全部排队项（FB-18 许可黑洞）：等待超时后放弃排队，
+   * 迟到的许可（race 竞态下恰好放行）由调用方 release 归还。
+   * @returns 是否有排队项被取消（false = 已持许可或不在队列）
+   */
+  cancel(jobId: string): boolean {
+    let cancelled = false;
+    for (const entry of this.waiting) {
+      if (entry.job.id === jobId && !entry.cancelled) {
+        entry.cancelled = true;
+        cancelled = true;
+      }
+    }
+    return cancelled;
+  }
+
   /** 当前队列状态。 */
   stats(): QueueStats {
     return { running: this.running, waiting: this.waiting.length };

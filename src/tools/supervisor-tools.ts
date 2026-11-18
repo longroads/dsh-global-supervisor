@@ -234,6 +234,7 @@ export function buildSupervisorTools(stack: SupervisorStack): ToolDefinition[] {
       task_id: { type: 'string' },
       session_id: { type: 'string', description: '指定执行会话（可选；不填用项目 Worker）' },
       fresh_session: { type: 'boolean', description: 'true 时为本任务新建专用会话（可选）' },
+      agent_preset: { type: 'string', description: 'fresh_session 新建会话的宿主预设名（可选；预设决定工具集——不传则无执行类工具，任务将无法落盘，强烈建议传入）' },
     }, ['task_id']),
     resultSchema: RESULT,
     guard, guardDeniedMessage: DENIED,
@@ -250,7 +251,10 @@ export function buildSupervisorTools(stack: SupervisorStack): ToolDefinition[] {
         const path = await resolveWorkspacePath(stack, workspaceId);
         if (path === undefined) return { ok: false, error: `workspace-path-unresolved: ${workspaceId}` };
         try {
-          const sessionId = await stack.agentController.createWorkerSession(path, { sessionId: ctx.callerSessionId, role: 'router' });
+          const sessionId = await stack.agentController.createWorkerSession(path, { sessionId: ctx.callerSessionId, role: 'router' }, {
+            ...(optionalStringArg(record, 'agent_preset') !== undefined ? { agentPreset: optionalStringArg(record, 'agent_preset') } : {}),
+            ...(await resolveSessionModelPref(stack, taskId)),
+          });
           override = { sessionId };
         } catch (error) {
           return { ok: false, error: `session-create-failed: ${error instanceof Error ? error.message : String(error)}` };
@@ -726,20 +730,31 @@ export function buildSupervisorTools(stack: SupervisorStack): ToolDefinition[] {
 
   tools.push(makeTool({
     name: 'supervisor_session_create',
-    description: '在受管 workspace 下按需创建全新 Worker 会话（FB-10①：会话供给——换绑不再依赖"恰好有另一个空闲会话"的巧合）。返回新 session_id，可用 supervisor_workspace_update 绑定为项目 Worker，或 supervisor_task_assign 的 session_id 参数单任务使用。长寿命会话行为退化（空转/汇报循环）时的标准轮换手段',
-    parameters: OBJ({ workspace_id: { type: 'string', description: '受管 DSH workspace ID（须已纳管）' } }, ['workspace_id']),
+    description: '在受管 workspace 下按需创建全新 Worker 会话（FB-10①：会话供给——换绑不再依赖"恰好有另一个空闲会话"的巧合）。返回新 session_id，可用 supervisor_workspace_update 绑定为项目 Worker，或 supervisor_task_assign 的 session_id 参数单任务使用。长寿命会话行为退化（空转/汇报循环）时的标准轮换手段。agent_preset 指定宿主预设（决定新会话的工具集——不传则仅只读工具，无法执行任务，必须传）；模型路由自动解析：项目偏好 → llm 目录默认',
+    parameters: OBJ({
+      workspace_id: { type: 'string', description: '受管 DSH workspace ID（须已纳管）' },
+      agent_preset: { type: 'string', description: '宿主会话预设名（决定工具集；预设无效时创建报错并返回原因）' },
+    }, ['workspace_id']),
     resultSchema: RESULT,
     guard, guardDeniedMessage: DENIED,
     timeoutMs: 60_000,
     handler: async (args, ctx) => {
       const record = asRecord(args);
       const workspaceId = stringArg(record, 'workspace_id');
+      const agentPreset = optionalStringArg(record, 'agent_preset');
+      if (agentPreset === undefined) {
+        return { ok: false, error: 'agent_preset 未提供：编程创建的会话默认无执行类工具（FB-20 实证），任务将无法落盘执行——请传入宿主预设名（含 bash/write/edit 的标准预设）' };
+      }
       const project = await stack.workspaceManager.projectByWorkspace(workspaceId);
       if (!project) return { ok: false, error: `workspace-not-managed: ${workspaceId}（先 supervisor_workspace_adopt 纳管）` };
       const path = await resolveWorkspacePath(stack, workspaceId);
       if (path === undefined) return { ok: false, error: `workspace-path-unresolved: ${workspaceId}` };
       try {
-        const sessionId = await stack.agentController.createWorkerSession(path, { sessionId: ctx.callerSessionId, role: 'router' });
+        const sessionId = await stack.agentController.createWorkerSession(
+          path,
+          { sessionId: ctx.callerSessionId, role: 'router' },
+          { agentPreset, ...(await resolveSessionModelPrefByProject(stack, project.projectId)) },
+        );
         return {
           ok: true,
           session_id: sessionId,
@@ -874,6 +889,39 @@ export function buildSupervisorTools(stack: SupervisorStack): ToolDefinition[] {
 async function resolveWorkspacePath(stack: SupervisorStack, workspaceId: string): Promise<string | undefined> {
   const overview = await stack.workspaceManager.listWorkspaceOverview(true);
   return overview.find((item) => item.workspaceId === workspaceId)?.path;
+}
+
+/** 解析 model_pref_json 的最小面（工具层自用，与 AgentController.parseModelPref 同构）。 */
+function parseModelPrefJson(json: string | null | undefined): { provider: string; model: string } | undefined {
+  if (!json) return undefined;
+  try {
+    const parsed = JSON.parse(json) as { provider?: unknown; model?: unknown };
+    if (typeof parsed.provider === 'string' && typeof parsed.model === 'string') return { provider: parsed.provider, model: parsed.model };
+  } catch {
+    // 畸形偏好按无偏好处理，由目录回退兜底
+  }
+  return undefined;
+}
+
+/**
+ * 新建会话的初始模型路由（FB-20③ 无模型回退）：任务偏好 → 项目偏好 → llm 目录首个 provider 首个模型。
+ * 三处都解析不到时返回 undefined——会话将无路由（宿主不回退，followup 会报 no provider/model）。
+ */
+async function resolveSessionModelPref(stack: SupervisorStack, taskId: string): Promise<{ provider: string; model: string } | undefined> {
+  const task = stack.taskManager.tasks.byId(taskId);
+  const project = task ? stack.taskManager.projects.byId(task.project_id) : undefined;
+  const fromPref = parseModelPrefJson(task?.model_pref_json) ?? parseModelPrefJson(project?.model_pref_json);
+  if (fromPref !== undefined) return fromPref;
+  return resolveSessionModelPrefByProject(stack, project?.id);
+}
+
+/** 按项目解析初始模型路由（session_create 无任务上下文时用）：项目偏好 → llm 目录首个可用模型。 */
+async function resolveSessionModelPrefByProject(stack: SupervisorStack, projectId: string | undefined): Promise<{ provider: string; model: string } | undefined> {
+  const fromPref = parseModelPrefJson(projectId !== undefined ? stack.taskManager.projects.byId(projectId)?.model_pref_json : undefined);
+  if (fromPref !== undefined) return fromPref;
+  const catalog = await stack.llmCatalog.list();
+  const first = catalog?.find((entry) => entry.models.length > 0);
+  return first !== undefined ? { provider: first.provider, model: first.models[0]!.id } : undefined;
 }
 
 /** 单项目巡检：创建巡检任务并入队派发。 */

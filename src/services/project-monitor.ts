@@ -256,6 +256,12 @@ export class ProjectMonitor {
       return;
     }
     const agent = await this.options.agents.getAgent(assignedSessionId);
+    // FB-19 状态复查：getAgent 为慢异步点，任务可能在此期间被取消/终态——
+    // 催告（steer 会唤醒会话）与告警只对仍处 running 的任务生效
+    if (this.taskManager.tasks.byId(taskId)?.status !== 'running') {
+      this.lostSuspects.delete(taskId);
+      return;
+    }
     if (agent !== undefined) {
       this.lostSuspects.delete(taskId);
       result.idleSuspects.push(taskId);
@@ -353,14 +359,18 @@ export class ProjectMonitor {
     if (interval === 0) return;
     if (Date.now() - this.progressPushedAt < interval) return;
     if (snapshots.length === 0) return;
+    // FB-19 状态复查：快照生成与推送间隔着逐任务 getAgent 的慢链路，期间任务可能已取消/终态——
+    // 只推仍处 running 的任务，杜绝"取消后仍收到运行中快照"
+    const live = snapshots.filter((s) => this.taskManager.tasks.byId(s.taskId)?.status === 'running');
+    if (live.length === 0) return;
     this.progressPushedAt = Date.now();
-    const lines = snapshots.map((s) => {
+    const lines = live.map((s) => {
       const progress = s.progress === null ? '无汇报' : `${s.progress}%`;
       const age = s.lastReportAgeSec === null ? '从未汇报' : `${Math.max(1, Math.round(s.lastReportAgeSec / 60))} 分钟前`;
       const summary = (s.summary ?? '').slice(0, 60);
       return `- ${s.taskId}（${progress}，${age}，会话${s.agentStatus}${summary !== '' ? `：${summary}` : ''}）`;
     });
-    await this.options.notify?.(`运行中任务 ${snapshots.length} 个：\n${lines.join('\n')}`, 'info');
+    await this.options.notify?.(`运行中任务 ${live.length} 个：\n${lines.join('\n')}`, 'info');
   }
 }
 

@@ -190,7 +190,15 @@ export function apply(ctx: Context, config: PluginConfig): void {
           void writeLoadMarker('restart-recovery', recovery);
           ctx.logger.info(`重启恢复：${recovery.pendingIds.length} 个任务存疑待汇报，${recovery.expiredIds.length} 个已判超时`);
         }
-        stack.monitor.start();
+        // FB-19 热重载 timer 泺漏：扫描与 IM 重试定时器挂入 effect 清理链——
+        // 插件卸载/热重载时框架自动执行 disposer（与 0.6.2 修掉的路由泄漏同源）
+        ctx.effect(() => {
+          stack.monitor.start();
+          return () => {
+            stack.monitor.stop();
+            stack.notifier.stop();
+          };
+        });
         // Schedule 对账（第八节：Host 任务与本地绑定双向核对；远端消失的绑定停用）
         const scheduleReconcile = await stack.scheduler.reconcile();
         if (scheduleReconcile.remoteMissing.length > 0) {

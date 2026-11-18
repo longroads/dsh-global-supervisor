@@ -36,8 +36,10 @@ export function buildWorkerReportTool(stack: SupervisorStack): ToolDefinition {
       },
       additionalProperties: true,
     },
-    guard: (caller) => stack.taskManager.projects.list(true).some((project) => project.worker_session_id === caller),
-    guardDeniedMessage: '仅受管项目的 Worker 会话可调用 worker_report',
+  guard: (caller) =>
+    stack.taskManager.projects.list(true).some((project) => project.worker_session_id === caller) ||
+    stack.taskManager.tasks.list({ status: 'running' }).some((task) => task.assigned_session_id === caller),
+  guardDeniedMessage: '仅受管项目的 Worker 会话或任务执行会话可调用 worker_report',
     handler: (args, ctx) => {
       let report;
       try {

@@ -18,12 +18,18 @@ import type { WorkerReport } from '../protocols/worker-report.js';
 /** 派发结果（机器消费值）。 */
 export interface DispatchResult {
   dispatched: boolean;
-  reason: 'ok' | 'no-worker-session' | 'busy' | 'task-missing' | 'adopted' | 'session-degenerated';
+  reason: 'ok' | 'no-worker-session' | 'busy' | 'task-missing' | 'adopted' | 'session-degenerated' | 'queue-timeout';
   taskId: string;
 }
 
 /** 默认执行超时（30 分钟，方案 §5.1 tasks.timeout_at）。 */
 const DEFAULT_TIMEOUT_MS = 30 * 60 * 1000;
+
+/** 队列等待上限（FB-18 许可黑洞）：并发许可被前序空转任务占死时，排队等待超过此值即放弃， */
+const DEFAULT_QUEUE_WAIT_MS = 90 * 1000;
+
+/** 派发后活性校验延迟（FB-18/20）：followup 后此时刻会话仍未注册 → 快速失败（而非等启动窗口 10 分钟）。 */
+const DEFAULT_LIVENESS_CHECK_MS = 30 * 1000;
 
 /** 解析 model_pref_json（畸形返回 undefined——偏好坏行不阻断派发）。 */
 function parseModelPref(json: string | null | undefined): ModelPrefInput | undefined {
@@ -50,16 +56,23 @@ export class AgentController {
   private readonly pluginSettings: PluginSettingRepository;
   /** 记忆仓库（0.7.2：派发指令注入相关偏好/事实）。 */
   readonly memories: MemoryRepository;
+  /** 派发节奏参数（测试可注入小值加速）。 */
+  private readonly timing: { queueWaitMs: number; livenessCheckMs: number };
 
   constructor(
     private readonly agents: DshAgentAdapter,
     readonly taskManager: TaskManager,
     private readonly db: DatabaseSync,
     maxConcurrency = 1,
+    timing?: { queueWaitMs?: number; livenessCheckMs?: number },
   ) {
     this.queue = new ModelQueue(maxConcurrency);
     this.pluginSettings = new PluginSettingRepository(db);
     this.memories = new MemoryRepository(db);
+    this.timing = {
+      queueWaitMs: timing?.queueWaitMs ?? DEFAULT_QUEUE_WAIT_MS,
+      livenessCheckMs: timing?.livenessCheckMs ?? DEFAULT_LIVENESS_CHECK_MS,
+    };
   }
 
   /** 心跳契约间隔（缺省 5 分钟；任务分类命中覆盖表时用分类值；须小于 idleStaleMs 否则契约必然违约）。 */
@@ -74,17 +87,21 @@ export class AgentController {
    * 按需创建 Worker 会话（FB-10①）：生成 session-<uuid> 身份并落在指定 workspace 目录。
    * 用于长寿命会话行为退化后的会话轮换、或一任务一专用执行体（零上下文污染）。
    */
-  async createWorkerSession(cwd: string, actor: { sessionId?: string; role: 'router' | 'system' }): Promise<string> {
+  async createWorkerSession(
+    cwd: string,
+    actor: { sessionId?: string; role: 'router' | 'system' },
+    opts?: { agentPreset?: string; provider?: string; model?: string },
+  ): Promise<string> {
     const { randomUUID } = await import('../utils/id.js');
     const sessionId = `session-${(await randomUUID())}`;
-    const liveReady = await this.agents.createSession(sessionId, cwd);
+    const liveReady = await this.agents.createSession(sessionId, cwd, opts);
     this.taskManager.audit.log({
       actorSessionId: actor.sessionId,
       actorRole: actor.role,
       action: 'session.create',
       targetType: 'session',
       targetId: sessionId,
-      detailJson: JSON.stringify({ cwd, liveReady: liveReady ? 1 : 0 }),
+      detailJson: JSON.stringify({ cwd, liveReady: liveReady ? 1 : 0, ...(opts ?? {}) }),
     });
     return sessionId;
   }
@@ -117,17 +134,71 @@ export class AgentController {
     if (await this.agents.isBusy(workerSession)) {
       return { dispatched: false, reason: 'busy', taskId };
     }
-    const permit = await this.queue.submit({ id: taskId, priority: task.priority });
+    // FB-18 许可黑洞：空转会话永不发终态汇报，并发 1 的许可只能等 watchdog 判死释放——
+    // 后续任务在队列里空等 10-30 分钟（实测 20/31 分钟与判死窗口吻合）。
+    // 等待超过上限即放弃排队（任务保持 queued，可再次派发）；race 竞态下迟到的许可立即归还。
+    const waitLimit = this.timing.queueWaitMs;
+    let timedOut = false;
+    const permit = await Promise.race([
+      this.queue.submit({ id: taskId, priority: task.priority }).then((handle) => {
+        if (timedOut) {
+          handle.release();
+          return undefined as unknown as ReleaseHandle;
+        }
+        return handle;
+      }),
+      new Promise<undefined>((resolve) => {
+        setTimeout(() => {
+          timedOut = true;
+          this.queue.cancel(taskId);
+          resolve(undefined);
+        }, waitLimit);
+      }),
+    ]);
+    if (permit === undefined) return { dispatched: false, reason: 'queue-timeout', taskId };
     try {
       this.taskManager.markDispatched(taskId, workerSession, new Date(Date.now() + DEFAULT_TIMEOUT_MS).toISOString());
       const modelPref = parseModelPref(task.model_pref_json) ?? parseModelPref(project?.model_pref_json);
       await this.agents.dispatch(workerSession, this.buildInstruction(task), modelPref);
       this.permits.set(taskId, permit);
+      this.scheduleLivenessCheck(taskId, workerSession);
       return { dispatched: true, reason: 'ok', taskId };
     } catch (error) {
       permit.release();
       throw error;
     }
+  }
+
+  /**
+   * 派发后活性校验（FB-18/20 快速失败）：followup 后延迟检查会话是否出现在 registry——
+   * 编程创建缺装配（无预设/无模型路由）的会话往往从未激活，与其等启动窗口 10 分钟判死，
+   * 不如尽早释放许可并重排，让队列黑洞窗口从分钟级压到秒级。检查失败不阻塞主流程。
+   */
+  private scheduleLivenessCheck(taskId: string, sessionId: string): void {
+    const timer = setTimeout(() => {
+      void (async () => {
+        try {
+          const live = await this.agents.getAgent(sessionId).catch(() => undefined);
+          if (live !== undefined) return;
+          const task = this.taskManager.tasks.byId(taskId);
+          if (task?.status !== 'running' || task.assigned_session_id !== sessionId) return;
+          if (this.taskManager.markStartupTimeout(taskId)) {
+            this.taskManager.retry(taskId, { role: 'system' });
+            this.releasePermit(taskId);
+            this.taskManager.audit.log({
+              actorRole: 'system',
+              action: 'task.dispatch_abort',
+              targetType: 'task',
+              targetId: taskId,
+              detailJson: JSON.stringify({ sessionId, cause: 'session-not-live' }),
+            });
+          }
+        } catch {
+          // 校验链路自身异常不升级——watchdog 启动窗口仍是兜底
+        }
+      })();
+    }, this.timing.livenessCheckMs);
+    timer.unref?.();
   }
 
   /**
