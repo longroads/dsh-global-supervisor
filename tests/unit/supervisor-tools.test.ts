@@ -88,12 +88,14 @@ async function buildStack(seedProject = true): Promise<SupervisorStack> {
     cancel: () => undefined,
     whenIdle: async () => undefined,
   };
+  const createdSessions = new Set<string>();
   const agentsService = {
-    get: (sessionId: string) => (sessionId === WORKER_SESSION ? liveAgent : undefined),
+    get: (sessionId: string) => (sessionId === WORKER_SESSION || createdSessions.has(sessionId) ? liveAgent : undefined),
     list: () => [liveAgent],
     resume: async () => ({ agent: liveAgent }),
     create: async (options: Record<string, unknown>) => {
       agentSpies.creates.push(options);
+      createdSessions.add(String(options['sessionId']));
       return { agent: liveAgent, dispose: () => undefined };
     },
   };
@@ -469,6 +471,28 @@ describe('supervisor 工具权限与任务流', () => {
     // 显式 fresh_session 不受拦截（用户明确决策换会话）
     const fresh = await assign.execute({ task_id: task.id, fresh_session: true }, execOf(ROUTER_SESSION));
     expect((fresh as { ok: boolean }).ok).toBe(true);
+  });
+
+  it('FB-14：task_report 输出对历史脏数据兜底清洗（控制字符/孤立代理不炸 lossless 序列化）', async () => {
+    const stack = await buildStack();
+    const tools = buildSupervisorTools(stack);
+    const report = tools.find((t) => t.name === 'supervisor_task_report') as ToolDefinition;
+    const task = stack.taskManager.createTask({ projectId: 'proj-1', title: '脏数据任务', description: 'desc\x1b[31m' }, { sessionId: ROUTER_SESSION, role: 'router' });
+    stack.taskManager.reports.record({
+      taskId: task.id,
+      sessionId: WORKER_SESSION,
+      status: 'running',
+      summary: '日志摘录\x1b[32mOK\x1b[0m\x00结尾\ud800代理',
+    });
+    const result = (await report.execute({ task_id: task.id }, execOf(ROUTER_SESSION))) as {
+      ok: boolean;
+      task: { description: string };
+      latestReport: { summary: string | null };
+    };
+    expect(result.ok).toBe(true);
+    expect(result.task.description).toBe('desc');
+    expect(result.latestReport.summary).toBe('日志摘录OK结尾\uFFFD代理');
+    expect(() => JSON.stringify(result)).not.toThrow();
   });
 
   it('supervisor_session_create：受管 workspace 下创建新会话并返回使用提示（FB-10①）', async () => {

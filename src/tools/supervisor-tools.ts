@@ -11,6 +11,7 @@ import { PluginSettingRepository } from '../database/repository/plugin-setting-r
 import type { SupervisorStack } from '../runtime.js';
 import { WATCHDOG_SETTING_KEYS } from '../services/project-monitor.js';
 import { asRecord, intArg, makeTool, optionalStringArg, stringArg } from './toolkit.js';
+import { jsonSafeDeep } from '../utils/json-safe.js';
 
 /** Router 守卫：经 RouterIdentity 动态判定（运行时认领制，见 services/router-identity.ts）。 */
 function routerGuard(stack: SupervisorStack) {
@@ -303,12 +304,12 @@ export function buildSupervisorTools(stack: SupervisorStack): ToolDefinition[] {
       const taskId = stringArg(asRecord(args), 'task_id');
       const task = stack.taskManager.tasks.byId(taskId);
       if (!task) return { ok: false, error: 'not-found' };
-      return {
+      return jsonSafeDeep({
         ok: true,
         task,
         runs: stack.taskManager.runs.byTask(taskId),
         latestReport: stack.taskManager.reports.latestOf(taskId),
-      };
+      });
     },
   }));
 
@@ -508,7 +509,7 @@ export function buildSupervisorTools(stack: SupervisorStack): ToolDefinition[] {
         const threadEvents = threadIds.flatMap((threadId) => events.byThread(threadId, 20));
         const eventIds = new Set<string>(threadEvents.map((e) => e.event_id));
         if (sourceEvent !== undefined) eventIds.add(sourceEvent.event_id);
-        return {
+        return jsonSafeDeep({
           ok: true,
           task,
           runs: stack.taskManager.runs.byTask(taskId),
@@ -516,7 +517,7 @@ export function buildSupervisorTools(stack: SupervisorStack): ToolDefinition[] {
           source_event: sourceEvent ?? null,
           thread_events: threadEvents,
           links: { event_ids: [...eventIds], task_ids: [taskId], thread_ids: threadIds },
-        };
+        });
       }
       const anchorEventId = eventId as string;
       const event = events.byEventId(anchorEventId);

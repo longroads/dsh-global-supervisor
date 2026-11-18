@@ -73,10 +73,20 @@ export class DshAgentAdapter {
    * 创建全新 Worker 会话（FB-10①：会话供给，agents.create 为探针 VERIFIED 能力）。
    * 身份由调用方生成（session-<uuid>）；cwd 必须是受管 workspace 的绝对路径（会话边界校验）。
    * 不持久化 AgentHandle——后续派发走既有 get-or-resume 链路（Host 重启安全）。
+   *
+   * FB-17：create 返回与 registry 登记之间存在时序窗口——若派发此刻到达，ensureAgent 的
+   * get 未命中会落到对零历史会话 resume 的冷路径（装配路径完全不同，实测系统性空转）。
+   * 故 create 后有界轮询直至 registry 可见，返回就绪结果；调用方据此留审计。
    */
-  async createSession(sessionId: string, cwd: string): Promise<void> {
+  async createSession(sessionId: string, cwd: string, opts?: { readyTimeoutMs?: number }): Promise<boolean> {
     const agents = await this.agents();
     await agents.create({ sessionId: sessionId as SessionId, meta: { cwd } });
+    const deadline = Date.now() + (opts?.readyTimeoutMs ?? 10_000);
+    for (;;) {
+      if (agents.get(sessionId as SessionId) !== undefined) return true;
+      if (Date.now() >= deadline) return false;
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
   }
 
   /**

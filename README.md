@@ -55,7 +55,7 @@ Full documentation ships inside the npm package (in Chinese) at `node_modules/ds
 
 ## Status
 
-Version 0.7.2 — personal-assistant completion: task categories with per-category cadence overrides, dispatch contracts (acceptance + evidence + zero-LLM completion verification), four memory categories auto-injected into dispatches, a daily briefing tool (zero-LLM: running-by-category, exceptions, goal progress, open loops, weekly stats), automatic open-loop prompts on user commitments, and a session-degeneration circuit breaker. Prior: 0.6.x closed-loop hardening, 0.7.0 degeneration response & session supply, 0.7.1 heartbeat contract & progress visibility. 30 tools (29 Router + `worker_report`), 253 unit tests. Note: 0.6.0 was a broken publish (UTF-8 BOM) and is superseded — always update to the latest.
+Version 0.7.3 — verification-feedback fixes: FB-14 JSON-safe text sanitization for tool outputs (strips ANSI sequences/control chars/lone surrogates + length caps, applied at both ingest and egress — `supervisor_task_report` no longer fails wholesale on dirty log excerpts); FB-17 fresh-session readiness polling after `agents.create` (removes the create→dispatch timing race that caused systematic idle-spinning); FB-15 anti-idle dispatch contract (the first action must produce a host-visible side effect before any "started" report). Fresh-session workspace affinity and orphan-session event ingestion remain host API gaps (see docs/API_COMPATIBILITY.md). 30 tools (29 Router + `worker_report`), 266 unit tests.
 
 ## License
 

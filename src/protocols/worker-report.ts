@@ -3,11 +3,17 @@
  * 未知字段一律拒绝；类型与范围逐项检查。只依赖协议本身，无 DSH 依赖。
  */
 import type { TaskStatus } from '../types/index.js';
+import { sanitizeText } from '../utils/json-safe.js';
 
 /** 汇报中允许出现的任务状态（协议枚举，非完整任务状态机）。 */
 export const REPORT_STATUSES = ['running', 'completed', 'blocked', 'need_human', 'failed'] as const;
 
 export type ReportStatus = (typeof REPORT_STATUSES)[number];
+
+/** 入库侧各文本字段截断上限（FB-14：超长日志摘录截断而非放行/整体拒绝）。 */
+export const SUMMARY_MAX_LEN = 4000;
+export const LIST_ITEM_MAX_LEN = 500;
+export const EVIDENCE_MAX_LEN = 1000;
 
 /** 一份合法的 Worker 汇报（校验通过后的规范形态）。 */
 export interface WorkerReport {
@@ -98,11 +104,11 @@ export function parseWorkerReport(input: unknown): WorkerReport {
     taskId: taskId as string,
     status: status as ReportStatus,
     progress: progress as number | undefined,
-    summary: summary as string | undefined,
-    blockers: blockers as string[],
+    summary: summary !== undefined ? sanitizeText(summary as string, SUMMARY_MAX_LEN) : undefined,
+    blockers: (blockers as string[]).map((item) => sanitizeText(item, LIST_ITEM_MAX_LEN)),
     needHuman: needHuman as boolean,
-    suggestedActions: suggested as string[],
-    evidence: evidence as string | undefined,
+    suggestedActions: (suggested as string[]).map((item) => sanitizeText(item, LIST_ITEM_MAX_LEN)),
+    evidence: evidence !== undefined ? sanitizeText(evidence as string, EVIDENCE_MAX_LEN) : undefined,
   };
 }
 

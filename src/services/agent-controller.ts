@@ -77,14 +77,14 @@ export class AgentController {
   async createWorkerSession(cwd: string, actor: { sessionId?: string; role: 'router' | 'system' }): Promise<string> {
     const { randomUUID } = await import('../utils/id.js');
     const sessionId = `session-${(await randomUUID())}`;
-    await this.agents.createSession(sessionId, cwd);
+    const liveReady = await this.agents.createSession(sessionId, cwd);
     this.taskManager.audit.log({
       actorSessionId: actor.sessionId,
       actorRole: actor.role,
       action: 'session.create',
       targetType: 'session',
       targetId: sessionId,
-      detailJson: JSON.stringify({ cwd }),
+      detailJson: JSON.stringify({ cwd, liveReady: liveReady ? 1 : 0 }),
     });
     return sessionId;
   }
@@ -219,6 +219,8 @@ export class AgentController {
       `其中 task_id 必须为 ${task.id}；任务完成时 status=completed。`,
       `心跳契约：执行预计超过 ${heartbeatMinutes} 分钟时，必须每 ${heartbeatMinutes} 分钟调用一次 worker_report（status=running，progress/summary 简述当前进展）；`,
       '超时未收到心跳将触发系统催告并升级通知管理端。',
+      '防空转要求（FB-15）：接令后第一步必须立即执行产生宿主机可见副作用的动作（如创建本任务工作目录或产出首份文件），完成后才可发送"已开始"类汇报；',
+      '只汇报不行动、或汇报后长时间无宿主机痕迹，将被判定空转并触发系统干预（催告/换会话重派）。',
       ...(memories.length > 0 ? ['', '相关记忆（用户偏好与既定事实，执行时遵守）：', ...memories.map((m) => `- ${m}`)] : []),
     ]
       .filter((line) => line !== '')

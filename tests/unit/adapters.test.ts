@@ -139,6 +139,47 @@ describe('DshAgentAdapter 派发编排', () => {
   });
 });
 
+describe('FB-17 createSession 就绪轮询', () => {
+  it('create 后 registry 延迟登记：轮询至可见返回 true', async () => {
+    let getCalls = 0;
+    const agents = {
+      get: vi.fn(() => {
+        getCalls += 1;
+        return getCalls >= 3 ? { id: 'session-new', status: 'idle' } : undefined;
+      }),
+      create: vi.fn().mockResolvedValue(undefined),
+    };
+    const adapter = new DshAgentAdapter(fakeCtx({ agents }));
+    const ready = await adapter.createSession('session-new', 'E:\\proj\\p1', { readyTimeoutMs: 2000 });
+    expect(ready).toBe(true);
+    expect(agents.create).toHaveBeenCalledWith({ sessionId: 'session-new', meta: { cwd: 'E:\\proj\\p1' } });
+    expect(getCalls).toBeGreaterThanOrEqual(3);
+  });
+
+  it('registry 始终不可见：有界超时返回 false 而非挂起', async () => {
+    const agents = {
+      get: vi.fn().mockReturnValue(undefined),
+      create: vi.fn().mockResolvedValue(undefined),
+    };
+    const adapter = new DshAgentAdapter(fakeCtx({ agents }));
+    const started = Date.now();
+    const ready = await adapter.createSession('session-new', 'E:\\proj\\p1', { readyTimeoutMs: 400 });
+    expect(ready).toBe(false);
+    expect(Date.now() - started).toBeGreaterThanOrEqual(350);
+    expect(agents.get.mock.calls.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('registry 立即可见：一次命中无额外等待', async () => {
+    const agents = {
+      get: vi.fn().mockReturnValue({ id: 'session-new', status: 'idle' }),
+      create: vi.fn().mockResolvedValue(undefined),
+    };
+    const adapter = new DshAgentAdapter(fakeCtx({ agents }));
+    expect(await adapter.createSession('session-new', 'E:\\proj\\p1')).toBe(true);
+    expect(agents.get).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe('DshSessionAdapter', () => {
   it('快照映射与会话存在性判断', async () => {
     const persistence = {
