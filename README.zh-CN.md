@@ -54,7 +54,7 @@ dsh plugin --profile desktop update dsh-global-supervisor
 
 ## 状态
 
-当前版本 0.7.8：执行超时智能化——execution_timeout_ms 进 watchdog_config（默认 30 分钟总预算，分类覆盖支持）；**有推进才续期**（running 心跳且 progress 增长或 summary 变化才顺延超时——真推进的长任务不误杀，复读心跳的假死照常判死）；**停滞检测进快照**（逐轮对照 progress/summary，快照事件与进度推送带"疑似停滞 N 分钟"标记——Router 零 LLM 识别假死）；修复快照 eventId 同毫秒静默去重缺陷。31 个工具、277 个单测。
+当前版本 0.7.9：交互契约（FB-27）——派发指令明令禁用 ask_user_question（任务级会话无终端用户，弹窗即永久挂起阻塞一切注入），人工决策唯一出口收敛为 worker_report(need_human, blockers/suggested_actions)——Router 代决策后 steer 回传闭环；idle 告警两段化（催告无响应 → 疑似交互/审批挂起告警 + cancel 重派处置）。31 个工具、278 个单测。
 
 ## License
 

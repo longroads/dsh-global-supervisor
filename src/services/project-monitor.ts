@@ -281,9 +281,11 @@ export class ProjectMonitor {
       result.idleSuspects.push(taskId);
       // FB-11 两段式：超龄先催告 Worker 立即补心跳（去抖），同时升级告警 Router（info→warning）
       const nudged = await this.nudgeHeartbeat(taskId, assignedSessionId, idleStale);
+      // 两段化（FB-27）：首催 = 正常催告；去抖中 = 催告已注入但无响应——疑似 ask_user_question/审批挂起阻塞回合
       await this.options.notify?.(
-        `任务 ${taskId} 的 Worker 会话空闲已超 ${Math.round(idleStale / 60000)} 分钟且无汇报${nudged ? '（已催告心跳）' : '（本轮催告去抖中）'}，请核实进展` +
-          '——若疑似审批挂起或会话卡死（steer 无响应），可 supervisor_task_cancel 后 fresh_session 重派',
+        nudged
+          ? `任务 ${taskId} 的 Worker 会话空闲已超 ${Math.round(idleStale / 60000)} 分钟且无汇报（已催告心跳），请核实进展`
+          : `任务 ${taskId} 催告已注入但 Worker 仍无响应（会话空闲持续超 ${Math.round(idleStale / 60000)} 分钟）——疑似交互/审批挂起阻塞回合（FB-24/27），注入消息将永远排队：建议 supervisor_task_cancel 后 fresh_session 重派`,
         'warning',
       );
       return;

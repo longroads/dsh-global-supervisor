@@ -325,6 +325,8 @@ export class AgentController {
       '超时未收到心跳将触发系统催告并升级通知管理端。',
       '防空转要求（FB-15）：接令后第一步必须立即执行产生宿主机可见副作用的动作（如创建本任务工作目录或产出首份文件），完成后才可发送"已开始"类汇报；',
       '只汇报不行动、或汇报后长时间无宿主机痕迹，将被判定空转并触发系统干预（催告/换会话重派）。',
+      '交互契约（FB-27）：本会话无终端用户——需要人工决策时禁止调用 ask_user_question 等交互工具（无人应答将永久挂起任务），',
+      '唯一出口是 worker_report(status=need_human, need_human=true, blockers 说明问题、suggested_actions 给出选项)——Router 会代为决策并回传结论；',
       ...(memories.length > 0 ? ['', '相关记忆（用户偏好与既定事实，执行时遵守）：', ...memories.map((m) => `- ${m}`)] : []),
     ]
       .filter((line) => line !== '')

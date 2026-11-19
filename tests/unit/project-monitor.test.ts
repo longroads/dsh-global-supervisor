@@ -356,7 +356,9 @@ describe('ProjectMonitor 看门狗修复（FB-2/FB-4/FB-7）', () => {
     expect(steers).toHaveLength(1);
     expect(notified).toHaveLength(2);
     expect(notified[0]?.message).toContain('已催告心跳');
-    expect(notified[1]?.message).toContain('去抖');
+    // 0.7.9 两段化：第二轮（催告已注入但无响应）升级为疑似交互/审批挂起告警
+    expect(notified[1]?.message).toContain('仍无响应');
+    expect(notified[1]?.message).toContain('疑似交互/审批挂起');
   });
 
   it('FB-12/13 零 LLM 快照与巡检摘要：每轮扫描落 progress_snapshot 与 patrol.summary 事件', async () => {

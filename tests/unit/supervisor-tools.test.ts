@@ -594,6 +594,18 @@ describe('supervisor 工具权限与任务流', () => {
     expect(agentSpies.followups.at(-1)).toContain('workspace_id=ws-1');
   });
 
+  it('FB-27 交互契约：派发指令禁 ask_user_question、唯一出口 need_human 汇报', async () => {
+    const stack = await buildStack();
+    const task = stack.taskManager.createTask({ projectId: 'proj-1', title: '决策型任务' }, { sessionId: ROUTER_SESSION, role: 'router' });
+    stack.taskManager.enqueue(task.id, { sessionId: ROUTER_SESSION, role: 'router' });
+    const dispatch = await stack.agentController.dispatchTask(task.id);
+    expect(dispatch.dispatched).toBe(true);
+    const instruction = agentSpies.followups.at(-1) ?? '';
+    expect(instruction).toContain('ask_user_question');
+    expect(instruction).toContain('交互契约');
+    expect(instruction).toContain('status=need_human');
+  });
+
   it('FB-18 队列等待上限：许可被占时排队超时返回 queue-timeout，迟到许可被归还不泄漏', async () => {
     const stack = await buildStack(true, { queueWaitMs: 100 });
     const first = stack.taskManager.createTask({ projectId: 'proj-1', title: 'A' }, { sessionId: ROUTER_SESSION, role: 'router' });

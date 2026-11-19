@@ -55,7 +55,7 @@ Full documentation ships inside the npm package (in Chinese) at `node_modules/ds
 
 ## Status
 
-Version 0.7.8 — smarter execution timeouts: `execution_timeout_ms` joins the watchdog config (default 30-minute total budget, per-category overrides supported); **progress-gated renewal** — a running heartbeat renews the deadline only when progress grows or the summary changes, so genuinely advancing long tasks are never killed while parroting heartbeats still time out; **stall detection in snapshots** — each scan compares progress/summary against the last, and both the snapshot events and the progress digest carry a "stalled for N minutes" marker so the Router spots live-but-dead workers without any LLM; also fixes a silent same-millisecond event dedup bug in snapshots. 31 tools, 277 unit tests.
+Version 0.7.9 — interaction contract (FB-27): dispatch instructions now explicitly forbid `ask_user_question` (task-scoped sessions have no terminal user — a popup pends forever and blocks every injected message); the sole human-decision channel is `worker_report(status=need_human, blockers/suggested_actions)`, with the Router deciding and steering the answer back. Idle alerts are now two-stage: a nudge with no response escalates to a "suspected interaction/approval hang" warning with the cancel-and-redispatch remedy. 31 tools, 278 unit tests.
 
 ## License
 
