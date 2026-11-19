@@ -220,6 +220,27 @@ describe('ProjectMonitor 四分类增强（Phase 5-C）', () => {
     expect(notified[0]?.severity).toBe('critical');
   });
 
+  it('0.7.8 停滞检测：progress/summary 复读的快照累计 stalledMs，推进即清零（假死可见）', async () => {
+    const { monitor, manager, db } = await setup({ startingTimeoutMs: 60 * 60 * 1000, settings: fakeSettings({ 'watchdog.progressPushIntervalMs': 0 }) });
+    const taskId = runningTask(manager, futureIso());
+    manager.applyWorkerReport(parseWorkerReport({ workspace_id: 'ws-1', task_id: taskId, status: 'running', progress: 50, summary: '编译中' }), WORKER);
+    const latestSnapshot = (): { taskId: string; stalledMs: number | null } =>
+      JSON.parse((db.prepare("SELECT payload_json FROM events WHERE type = 'task.progress_snapshot' ORDER BY id DESC LIMIT 1").get() as { payload_json: string }).payload_json);
+    const tick = () => new Promise((resolve) => setTimeout(resolve, 5));
+    await monitor.scanOnce();
+    expect(latestSnapshot().stalledMs).toBeNull();
+    await tick;
+    await monitor.scanOnce();
+    await tick;
+    await monitor.scanOnce();
+    const stalled = latestSnapshot();
+    expect(stalled.stalledMs).toBeGreaterThanOrEqual(0);
+    manager.applyWorkerReport(parseWorkerReport({ workspace_id: 'ws-1', task_id: taskId, status: 'running', progress: 70, summary: '编译中' }), WORKER);
+    await tick;
+    await monitor.scanOnce();
+    expect(latestSnapshot().stalledMs).toBeNull();
+  });
+
   it('FB-19：getAgent 慢异步期间任务被取消 → 不催告不告警不推送（终态任务零副作用）', async () => {
     const notified: Notice[] = [];
     const cancelOnGet = {

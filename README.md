@@ -55,7 +55,7 @@ Full documentation ships inside the npm package (in Chinese) at `node_modules/ds
 
 ## Status
 
-Version 0.7.7 — execution-environment fix (FB-24/25 triple deadlock resolved at the parameter level): programmatically created sessions now write policy events into their session log during setup (the same mechanism the host's own subagents use) — `sandbox/mode` defaults to `danger-full-access` (configurable via a new `sandbox_mode` parameter; the host's own guidance for sandbox-unavailable environments) and `approval/policy=never` (approvals never pend — boundary hits are rejected outright and the worker reports `blocked` honestly, eliminating the "no approval receiver" deadlock on task-scoped sessions). Watchdog idle alerts now suggest the cancel-and-redispatch remedy. 31 tools, 275 unit tests.
+Version 0.7.8 — smarter execution timeouts: `execution_timeout_ms` joins the watchdog config (default 30-minute total budget, per-category overrides supported); **progress-gated renewal** — a running heartbeat renews the deadline only when progress grows or the summary changes, so genuinely advancing long tasks are never killed while parroting heartbeats still time out; **stall detection in snapshots** — each scan compares progress/summary against the last, and both the snapshot events and the progress digest carry a "stalled for N minutes" marker so the Router spots live-but-dead workers without any LLM; also fixes a silent same-millisecond event dedup bug in snapshots. 31 tools, 277 unit tests.
 
 ## License
 

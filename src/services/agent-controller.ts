@@ -22,7 +22,7 @@ export interface DispatchResult {
   taskId: string;
 }
 
-/** 默认执行超时（30 分钟，方案 §5.1 tasks.timeout_at）。 */
+/** 默认执行超时（30 分钟总预算，方案 §5.1；0.7.8 起可配 watchdog.executionTimeoutMs + 分类覆盖 + 有推进心跳续期）。 */
 const DEFAULT_TIMEOUT_MS = 30 * 60 * 1000;
 
 /** 队列等待上限（FB-18 许可黑洞）：并发许可被前序空转任务占死时，排队等待超过此值即放弃， */
@@ -81,6 +81,14 @@ export class AgentController {
     if (typeof overridden === 'number' && Number.isFinite(overridden) && overridden > 0) return overridden;
     const configured = this.pluginSettings.getJson<number>(WATCHDOG_SETTING_KEYS.heartbeatIntervalMs);
     return typeof configured === 'number' && Number.isFinite(configured) && configured > 0 ? configured : 5 * 60 * 1000;
+  }
+
+  /** 执行超时窗口（0.7.8：KV 可配 + 分类覆盖；默认 30 分钟总预算——沉默检测由启动/空闲/心跳分担）。 */
+  private executionTimeoutMs(category?: string | null): number {
+    const overridden = category != null ? readCategoryOverrides(this.pluginSettings)[category]?.executionTimeoutMs : undefined;
+    if (typeof overridden === 'number' && Number.isFinite(overridden) && overridden > 0) return overridden;
+    const configured = this.pluginSettings.getJson<number>(WATCHDOG_SETTING_KEYS.executionTimeoutMs);
+    return typeof configured === 'number' && Number.isFinite(configured) && configured > 0 ? configured : DEFAULT_TIMEOUT_MS;
   }
 
   /**
@@ -157,7 +165,7 @@ export class AgentController {
     ]);
     if (permit === undefined) return { dispatched: false, reason: 'queue-timeout', taskId };
     try {
-      this.taskManager.markDispatched(taskId, workerSession, new Date(Date.now() + DEFAULT_TIMEOUT_MS).toISOString());
+      this.taskManager.markDispatched(taskId, workerSession, new Date(Date.now() + this.executionTimeoutMs(task.category)).toISOString());
       const modelPref = parseModelPref(task.model_pref_json) ?? parseModelPref(project?.model_pref_json);
       await this.agents.dispatch(workerSession, this.buildInstruction(task, project?.workspace_id), modelPref);
       this.permits.set(taskId, permit);
@@ -206,15 +214,37 @@ export class AgentController {
    * worker_report 工具的唯一后端入口。
    */
   applyWorkerReport(report: WorkerReport, callerSessionId: string): ReportOutcome {
+    const lastBefore = this.taskManager.reports.latestOf(report.taskId);
     const outcome = this.taskManager.applyWorkerReport(report, callerSessionId);
-    if (outcome.accepted && (outcome.reason === 'applied' || outcome.reason === 'adopted')) {
-      const permit = this.permits.get(report.taskId);
-      if (permit) {
-        permit.release();
-        this.permits.delete(report.taskId);
+    if (outcome.accepted) {
+      if (outcome.reason === 'applied' || outcome.reason === 'adopted') {
+        const permit = this.permits.get(report.taskId);
+        if (permit) {
+          permit.release();
+          this.permits.delete(report.taskId);
+        }
+      }
+      if (outcome.reason === 'heartbeat') {
+        this.extendTimeoutIfProgressed(report, lastBefore);
       }
     }
     return outcome;
+  }
+
+  /**
+   * 有推进才续期（0.7.8，与 monitor 停滞判定同一"推进"定义）：
+   * running 心跳且 progress 增长或 summary 变化 → 顺延 timeout_at 一个完整窗口；
+   * 内容复读的心跳不续——假死照旧超时判死（防无限续期）。
+   */
+  private extendTimeoutIfProgressed(report: WorkerReport, lastBefore: { progress: number | null; summary: string | null } | undefined): void {
+    if (report.status !== 'running') return;
+    const task = this.taskManager.tasks.byId(report.taskId);
+    if (task === undefined || task.status !== 'running') return;
+    const firstReport = lastBefore === undefined;
+    const progressGrew = report.progress !== undefined && (lastBefore?.progress === null || lastBefore === undefined || report.progress > (lastBefore.progress ?? -1));
+    const summaryChanged = report.summary !== undefined && report.summary !== (lastBefore?.summary ?? null);
+    if (!firstReport && !progressGrew && !summaryChanged) return;
+    this.taskManager.extendTimeout(report.taskId, new Date(Date.now() + this.executionTimeoutMs(task.category)).toISOString());
   }
 
   /** 对 live 会话立即应用模型选择（工具层入口；冷会话返回 false）。 */

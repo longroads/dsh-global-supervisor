@@ -54,7 +54,7 @@ dsh plugin --profile desktop update dsh-global-supervisor
 
 ## 状态
 
-当前版本 0.7.7：执行环境修复（FB-24/25 三合一死锁参数级化解）——编程创建会话在 setup 内向 Session 写入权限事件（宿主子代理同款机制）：sandbox/mode 默认 danger-full-access（可配 workspace-write/read-only；沙箱后端不可用环境的官方指引）+ approval/policy=never（审批永不挂起，触碰边界直接拒绝并如实 blocked——杜绝任务级会话"审批无人接收"死锁）；session_create/assign 新增 sandbox_mode 参数；watchdog idle 告警补审批挂起处置提示。31 个工具、275 个单测。
+当前版本 0.7.8：执行超时智能化——execution_timeout_ms 进 watchdog_config（默认 30 分钟总预算，分类覆盖支持）；**有推进才续期**（running 心跳且 progress 增长或 summary 变化才顺延超时——真推进的长任务不误杀，复读心跳的假死照常判死）；**停滞检测进快照**（逐轮对照 progress/summary，快照事件与进度推送带"疑似停滞 N 分钟"标记——Router 零 LLM 识别假死）；修复快照 eventId 同毫秒静默去重缺陷。31 个工具、277 个单测。
 
 ## License
 

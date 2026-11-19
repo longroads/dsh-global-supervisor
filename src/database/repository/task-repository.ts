@@ -105,6 +105,14 @@ export class TaskRepository {
     return result.changes > 0;
   }
 
+  /** 有推进心跳的执行超时顺延（0.7.8）：仅 running 任务生效，防"活着但不收敛"的无限续期由调用方判定。 */
+  extendTimeout(id: string, timeoutAt: string): boolean {
+    const result = this.db
+      .prepare("UPDATE tasks SET timeout_at = ?, updated_at = ? WHERE id = ? AND status = 'running'")
+      .run(timeoutAt, now(), id);
+    return result.changes > 0;
+  }
+
   /** 最近一次 Worker 汇报时间（看门狗依据）。 */
   touchReport(id: string): void {
     this.db.prepare('UPDATE tasks SET last_report_at = ?, updated_at = ? WHERE id = ?').run(now(), now(), id);

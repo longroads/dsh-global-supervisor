@@ -42,6 +42,7 @@ export const WATCHDOG_SETTING_KEYS = {
   scanIntervalMs: 'watchdog.scanIntervalMs',
   heartbeatIntervalMs: 'watchdog.heartbeatIntervalMs',
   progressPushIntervalMs: 'watchdog.progressPushIntervalMs',
+  executionTimeoutMs: 'watchdog.executionTimeoutMs',
   categoryOverrides: 'watchdog.categoryOverrides',
 } as const;
 
@@ -50,6 +51,7 @@ export interface CategoryOverride {
   startingTimeoutMs?: number;
   idleStaleMs?: number;
   heartbeatIntervalMs?: number;
+  executionTimeoutMs?: number;
 }
 
 /** 读取分类覆盖表（畸形值整体忽略——覆盖配置坏行不阻断全局节奏）。 */
@@ -81,6 +83,8 @@ const DEFAULT_IDLE_STALE_MS = 10 * 60 * 1000;
 const DEFAULT_HEARTBEAT_MS = 5 * 60 * 1000;
 /** 进度推送缺省间隔（FB-12）：15 分钟；0 = 关闭。 */
 const DEFAULT_PROGRESS_PUSH_MS = 15 * 60 * 1000;
+/** 执行超时缺省（方案 §5.1）：30 分钟总预算（沉默检测由启动/空闲/心跳覆盖，此处仅防"活着但不收敛"）。 */
+export const DEFAULT_EXECUTION_TIMEOUT_MS = 30 * 60 * 1000;
 
 export class ProjectMonitor {
   private timer: ReturnType<typeof setInterval> | undefined;
@@ -92,6 +96,10 @@ export class ProjectMonitor {
   private readonly nudgedAt = new Map<string, number>();
   /** 上次进度推送毫秒时间戳（0 = 尚未推送过，首轮即推）。 */
   private progressPushedAt = 0;
+  /** 停滞对照（0.7.8 假死检测）：上次快照的 progress/summary 与首次停滞时刻；内存态，重启后重新观测。 */
+  private readonly stallTracker = new Map<string, { progress: number | null; summary: string | null; stalledSince: number | null }>();
+  /** 快照事件序号（eventId 确定性自增——Date.now() 在同毫秒扫描时会撞 event_id 唯一约束被静默去重）。 */
+  private snapshotSeq = 0;
 
   constructor(
     private readonly taskManager: TaskManager,
@@ -131,8 +139,13 @@ export class ProjectMonitor {
     return typeof configured === 'number' && configured === 0 ? 0 : positiveOverride(configured, DEFAULT_PROGRESS_PUSH_MS);
   }
 
+  /** 执行超时（KV 覆盖缺省；0.7.8 起可配 + 分类覆盖 + 有推进心跳续期）。 */
+  executionTimeoutMs(): number {
+    return positiveOverride(this.options.settings?.getJson<number>(WATCHDOG_SETTING_KEYS.executionTimeoutMs), DEFAULT_EXECUTION_TIMEOUT_MS);
+  }
+
   /** 当前生效的全部看门狗配置（supervisor_watchdog_config 查询与测试共用）。 */
-  effectiveConfig(): { startingTimeoutMs: number; approvalTimeoutMs: number; idleStaleMs: number; scanIntervalMs: number; heartbeatIntervalMs: number; progressPushIntervalMs: number } {
+  effectiveConfig(): { startingTimeoutMs: number; approvalTimeoutMs: number; idleStaleMs: number; scanIntervalMs: number; heartbeatIntervalMs: number; progressPushIntervalMs: number; executionTimeoutMs: number } {
     return {
       startingTimeoutMs: this.startingTimeoutMs(),
       approvalTimeoutMs: this.approvalTimeoutMs(),
@@ -140,6 +153,7 @@ export class ProjectMonitor {
       scanIntervalMs: this.scanIntervalMs(),
       heartbeatIntervalMs: this.heartbeatIntervalMs(),
       progressPushIntervalMs: this.progressPushIntervalMs(),
+      executionTimeoutMs: this.executionTimeoutMs(),
     };
   }
 
@@ -304,10 +318,12 @@ export class ProjectMonitor {
     return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : globalValue;
   }
 
-  /** 零 LLM 进度快照（FB-12）：running 任务 × 最近汇报 × 会话 Agent 状态，逐任务落事件流水。 */
+  /** 零 LLM 进度快照（FB-12 + 0.7.8 停滞标记）：running 任务 × 最近汇报 × 会话 Agent 状态，逐任务落事件流水。 */
   private async recordProgressSnapshots(): Promise<ProgressSnapshot[]> {
     const snapshots: ProgressSnapshot[] = [];
+    const seenTasks = new Set<string>();
     for (const task of this.taskManager.tasks.list({ status: 'running' })) {
+      seenTasks.add(task.id);
       const report = this.taskManager.reports.latestOf(task.id);
       let agentStatus: ProgressSnapshot['agentStatus'] = 'unknown';
       if (task.assigned_session_id !== null && this.options.agents !== undefined) {
@@ -315,23 +331,51 @@ export class ProjectMonitor {
         agentStatus = agent === undefined ? 'absent' : agent.status;
       }
       const ageMs = task.last_report_at === null ? null : Date.now() - Date.parse(task.last_report_at);
+      const progress = report?.progress ?? null;
+      const summary = report?.summary ?? null;
+      const stalledMs = this.trackStall(task.id, progress, summary);
       const snapshot: ProgressSnapshot = {
         taskId: task.id,
         lastReportAgeSec: ageMs === null ? null : Math.round(ageMs / 1000),
-        progress: report?.progress ?? null,
-        summary: report?.summary ?? null,
+        progress,
+        summary,
         agentStatus,
+        stalledMs,
       };
       snapshots.push(snapshot);
+      this.snapshotSeq += 1;
       this.taskManager.events.ingest({
-        eventId: `progress-snapshot:${task.id}:${Date.now()}`,
+        eventId: `progress-snapshot:${task.id}:${Date.now()}:${this.snapshotSeq}`,
         source: 'internal',
         type: 'task.progress_snapshot',
         taskId: task.id,
         payloadJson: JSON.stringify(snapshot),
       });
     }
+    for (const taskId of this.stallTracker.keys()) {
+      if (!seenTasks.has(taskId)) this.stallTracker.delete(taskId);
+    }
     return snapshots;
+  }
+
+  /**
+   * 停滞判定（0.7.8，与执行超时续期同一"推进"定义）：progress 与 summary 均与上次快照相同 → 持续累计停滞时长；
+   * 任一变化即清零。返回当前停滞毫秒（null = 有推进或首轮观测）。Router 据此识别"活着但假死"。
+   */
+  private trackStall(taskId: string, progress: number | null, summary: string | null): number | null {
+    const prev = this.stallTracker.get(taskId);
+    if (prev === undefined) {
+      this.stallTracker.set(taskId, { progress, summary, stalledSince: null });
+      return null;
+    }
+    const unchanged = prev.progress === progress && prev.summary === summary;
+    if (!unchanged) {
+      this.stallTracker.set(taskId, { progress, summary, stalledSince: null });
+      return null;
+    }
+    const since = prev.stalledSince ?? Date.now();
+    this.stallTracker.set(taskId, { progress, summary, stalledSince: since });
+    return Date.now() - since;
   }
 
   /** 巡检摘要事件（FB-13）：零 LLM 常态巡检的台账——异常分类计数与运行任务数（事件流可查）。 */
@@ -369,19 +413,22 @@ export class ProjectMonitor {
       const progress = s.progress === null ? '无汇报' : `${s.progress}%`;
       const age = s.lastReportAgeSec === null ? '从未汇报' : `${Math.max(1, Math.round(s.lastReportAgeSec / 60))} 分钟前`;
       const summary = (s.summary ?? '').slice(0, 60);
-      return `- ${s.taskId}（${progress}，${age}，会话${s.agentStatus}${summary !== '' ? `：${summary}` : ''}）`;
+      const stall = s.stalledMs !== null && s.stalledMs > 0 ? `，⚠疑似停滞 ${Math.max(1, Math.round(s.stalledMs / 60000))} 分钟（progress/summary 无变化——活着但未推进）` : '';
+      return `- ${s.taskId}（${progress}，${age}，会话${s.agentStatus}${stall}${summary !== '' ? `：${summary}` : ''}）`;
     });
     await this.options.notify?.(`运行中任务 ${live.length} 个：\n${lines.join('\n')}`, 'info');
   }
 }
 
-/** 单任务的零 LLM 进度快照（FB-12）。 */
+/** 单任务的零 LLM 进度快照（FB-12；stalledMs 0.7.8 假死检测）。 */
 export interface ProgressSnapshot {
   taskId: string;
   lastReportAgeSec: number | null;
   progress: number | null;
   summary: string | null;
   agentStatus: 'running' | 'idle' | 'absent' | 'unknown';
+  /** 与上次快照相比 progress/summary 均未变的持续时长（毫秒）；null = 有推进或首轮观测。 */
+  stalledMs: number | null;
 }
 
 /** 心跳催告文案（FB-11：要求 Worker 立即补报 running 心跳）。 */

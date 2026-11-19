@@ -154,6 +154,11 @@ export class TaskManager {
     return this.tasks.byId(taskId) as TaskRow;
   }
 
+  /** 有推进心跳的执行超时顺延（0.7.8，仅 running 任务；推进判定由调用方负责）。 */
+  extendTimeout(taskId: string, timeoutAt: string): boolean {
+    return this.tasks.extendTimeout(taskId, timeoutAt);
+  }
+
   /**
    * 应用一份 Worker 汇报（协议已在上层校验为规范形态）。
    * 身份规则：仅派发会话（assigned_session_id）可汇报。

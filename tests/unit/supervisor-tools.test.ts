@@ -859,8 +859,37 @@ describe('supervisor_watchdog_config 与纳管引导（FB-2/FB-8）', () => {
       scan_interval_ms: 300_000,
       heartbeat_interval_ms: 300_000,
       progress_push_interval_ms: 900_000,
+      execution_timeout_ms: 1_800_000,
       category_overrides: {},
     });
+  });
+
+  it('0.7.8 有推进才续期：progress 增长/summary 变化顺延 timeout_at，复读心跳不续', async () => {
+    const stack = await buildStack();
+    const task = stack.taskManager.createTask({ projectId: 'proj-1', title: '长任务' }, { sessionId: ROUTER_SESSION, role: 'router' });
+    stack.taskManager.enqueue(task.id, { sessionId: ROUTER_SESSION, role: 'router' });
+    const dispatch = await stack.agentController.dispatchTask(task.id);
+    expect(dispatch.dispatched).toBe(true);
+    const expiredIso = '2000-01-01T00:00:00.000Z';
+    const setExpired = () => stack.db.prepare('UPDATE tasks SET timeout_at = ? WHERE id = ?').run(expiredIso, task.id);
+    // 首报（首次汇报算推进）：过期时间被顺延为未来
+    stack.agentController.applyWorkerReport({ workspaceId: 'ws-1', taskId: task.id, status: 'running', progress: 10, summary: '阶段一', blockers: [], needHuman: false, suggestedActions: [] }, WORKER_SESSION);
+    expect(stack.taskManager.tasks.byId(task.id)?.timeout_at).not.toBe(expiredIso);
+    // 复读心跳（progress/summary 均不变）：不续期
+    setExpired();
+    stack.agentController.applyWorkerReport({ workspaceId: 'ws-1', taskId: task.id, status: 'running', progress: 10, summary: '阶段一', blockers: [], needHuman: false, suggestedActions: [] }, WORKER_SESSION);
+    expect(stack.taskManager.tasks.byId(task.id)?.timeout_at).toBe(expiredIso);
+    // progress 增长：续期
+    setExpired();
+    stack.agentController.applyWorkerReport({ workspaceId: 'ws-1', taskId: task.id, status: 'running', progress: 40, summary: '阶段一', blockers: [], needHuman: false, suggestedActions: [] }, WORKER_SESSION);
+    expect(stack.taskManager.tasks.byId(task.id)?.timeout_at).not.toBe(expiredIso);
+    // summary 变化（progress 不变）：续期
+    setExpired();
+    stack.agentController.applyWorkerReport({ workspaceId: 'ws-1', taskId: task.id, status: 'running', progress: 40, summary: '阶段二', blockers: [], needHuman: false, suggestedActions: [] }, WORKER_SESSION);
+    expect(stack.taskManager.tasks.byId(task.id)?.timeout_at).not.toBe(expiredIso);
+    // 终态汇报：任务 completed，不再有续期语义
+    stack.agentController.applyWorkerReport({ workspaceId: 'ws-1', taskId: task.id, status: 'completed', progress: 100, summary: 'done', blockers: [], needHuman: false, suggestedActions: [] }, WORKER_SESSION);
+    expect(stack.taskManager.tasks.byId(task.id)?.status).toBe('completed');
   });
 
   it('0.7.2 分类与记忆：task_create 带 category/acceptance 落库；memory_save/list/闭环；分类覆盖写入', async () => {

@@ -675,7 +675,7 @@ export function buildSupervisorTools(stack: SupervisorStack): ToolDefinition[] {
 
   tools.push(makeTool({
     name: 'supervisor_watchdog_config',
-    description: '查看或设置看门狗配置（毫秒，超时项下轮扫描生效、间隔下轮扫描后重排）：starting_timeout_ms 启动窗口（默认 600000；Worker Agent 活跃时自动宽限）、approval_timeout_ms 人工决策升级窗口（默认 60000）、idle_stale_ms Worker 空闲阈值（默认 600000，超龄先催告心跳再升级告警）、scan_interval_ms 扫描间隔（默认 300000 即 5 分钟）、heartbeat_interval_ms 心跳契约间隔（派发指令注入，默认 300000；须小于 idle_stale_ms）、progress_push_interval_ms 运行期进度推送间隔（默认 900000 即 15 分钟，0=关闭）。不传参数返回当前值',
+    description: '查看或设置看门狗配置（毫秒，超时项下轮扫描生效、间隔下轮扫描后重排）：starting_timeout_ms 启动窗口（默认 600000；Worker Agent 活跃时自动宽限）、approval_timeout_ms 人工决策升级窗口（默认 60000）、idle_stale_ms Worker 空闲阈值（默认 600000，超龄先催告心跳再升级告警）、scan_interval_ms 扫描间隔（默认 300000 即 5 分钟）、heartbeat_interval_ms 心跳契约间隔（派发指令注入，默认 300000；须小于 idle_stale_ms）、progress_push_interval_ms 运行期进度推送间隔（默认 900000 即 15 分钟，0=关闭）、execution_timeout_ms 执行超时总预算（默认 1800000 即 30 分钟；有推进的心跳自动顺延一个窗口——progress 增长或 summary 变化才算推进，复读心跳不续期照常判死）。不传参数返回当前值',
     parameters: OBJ({
       starting_timeout_ms: { type: 'integer', description: '启动窗口毫秒（1000-86400000）' },
       approval_timeout_ms: { type: 'integer', description: 'need_human 升级窗口毫秒（1000-86400000）' },
@@ -683,7 +683,8 @@ export function buildSupervisorTools(stack: SupervisorStack): ToolDefinition[] {
       scan_interval_ms: { type: 'integer', description: '扫描间隔毫秒（60000-86400000）' },
       heartbeat_interval_ms: { type: 'integer', description: '心跳契约间隔毫秒（1000-86400000，派发时注入指令）' },
       progress_push_interval_ms: { type: 'integer', description: '运行期进度推送间隔毫秒（0=关闭；1000-86400000）' },
-      category_overrides: { type: 'object', description: '分类级节奏覆盖表（对象键用 camelCase：{分类名:{startingTimeoutMs?,idleStaleMs?,heartbeatIntervalMs?}}，值为毫秒；整体替换）' },
+      execution_timeout_ms: { type: 'integer', description: '执行超时总预算毫秒（60000-86400000；系统级长任务建议调大；有推进心跳自动续期）' },
+      category_overrides: { type: 'object', description: '分类级节奏覆盖表（对象键用 camelCase：{分类名:{startingTimeoutMs?,idleStaleMs?,heartbeatIntervalMs?,executionTimeoutMs?}}，值为毫秒；整体替换）' },
     }),
     resultSchema: RESULT,
     guard, guardDeniedMessage: DENIED,
@@ -699,6 +700,7 @@ export function buildSupervisorTools(stack: SupervisorStack): ToolDefinition[] {
       const idle = clamp(record['idle_stale_ms']);
       const scan = clamp(record['scan_interval_ms'], 60_000);
       const heartbeat = clamp(record['heartbeat_interval_ms']);
+      const execution = clamp(record['execution_timeout_ms'], 60_000);
       // 进度推送显式允许 0（关闭）
       const progressRaw = record['progress_push_interval_ms'];
       const progressPush = progressRaw === 0 ? 0 : clamp(progressRaw);
@@ -708,17 +710,18 @@ export function buildSupervisorTools(stack: SupervisorStack): ToolDefinition[] {
       if (scan !== undefined) settings.setJson(WATCHDOG_SETTING_KEYS.scanIntervalMs, scan);
       if (heartbeat !== undefined) settings.setJson(WATCHDOG_SETTING_KEYS.heartbeatIntervalMs, heartbeat);
       if (progressPush !== undefined) settings.setJson(WATCHDOG_SETTING_KEYS.progressPushIntervalMs, progressPush);
+      if (execution !== undefined) settings.setJson(WATCHDOG_SETTING_KEYS.executionTimeoutMs, execution);
       const overridesRaw = record['category_overrides'];
       const overrides = typeof overridesRaw === 'object' && overridesRaw !== null && !Array.isArray(overridesRaw) ? (overridesRaw as Record<string, Record<string, number>>) : undefined;
       if (overrides !== undefined) settings.setJson(WATCHDOG_SETTING_KEYS.categoryOverrides, overrides);
-      if (starting !== undefined || approval !== undefined || idle !== undefined || scan !== undefined || heartbeat !== undefined || progressPush !== undefined || overrides !== undefined) {
+      if (starting !== undefined || approval !== undefined || idle !== undefined || scan !== undefined || heartbeat !== undefined || progressPush !== undefined || execution !== undefined || overrides !== undefined) {
         stack.taskManager.audit.log({
           actorSessionId: ctx.callerSessionId,
           actorRole: 'router',
           action: 'watchdog.config.set',
           targetType: 'watchdogConfig',
           targetId: 'watchdog',
-          detailJson: JSON.stringify({ startingTimeoutMs: starting ?? null, approvalTimeoutMs: approval ?? null, idleStaleMs: idle ?? null, scanIntervalMs: scan ?? null, heartbeatIntervalMs: heartbeat ?? null, progressPushIntervalMs: progressPush ?? null, categoryOverrides: overrides ?? null }),
+          detailJson: JSON.stringify({ startingTimeoutMs: starting ?? null, approvalTimeoutMs: approval ?? null, idleStaleMs: idle ?? null, scanIntervalMs: scan ?? null, heartbeatIntervalMs: heartbeat ?? null, progressPushIntervalMs: progressPush ?? null, executionTimeoutMs: execution ?? null, categoryOverrides: overrides ?? null }),
         });
       }
       const current = stack.monitor.effectiveConfig();
@@ -730,6 +733,7 @@ export function buildSupervisorTools(stack: SupervisorStack): ToolDefinition[] {
         scan_interval_ms: scan ?? current.scanIntervalMs,
         heartbeat_interval_ms: heartbeat ?? current.heartbeatIntervalMs,
         progress_push_interval_ms: progressPush ?? current.progressPushIntervalMs,
+        execution_timeout_ms: execution ?? current.executionTimeoutMs,
         category_overrides: overrides ?? settings.getJson<Record<string, unknown>>(WATCHDOG_SETTING_KEYS.categoryOverrides) ?? {},
       };
     },
