@@ -362,6 +362,49 @@ export async function runProbe(ctx: Context, configuredDir?: string): Promise<Pr
     }
   }));
 
+  // --- V10（FB-24/25）：编程会话权限事件写入 ---
+  // 宿主子代理（appendDelegatedPolicyOverrides）以 session log 事件设置权限——本检查验证
+  // 插件路径同样可写：setup 内 append sandbox/mode + approval/policy 不抛错且 create 正常发布。
+  // 行为级验证（bash 全权限执行）依赖沙箱后端可用的环境，由生产实测复核。
+  checks.push(await check('api.session-policy-append', '编程会话权限事件写入（V10：sandbox/mode + approval/policy）', async () => {
+    const agents = (await awaitService(ctx, 'agents')) as
+      | { create?: (options: unknown) => Promise<{ dispose?: () => Promise<void>; agent?: unknown }> }
+      | undefined;
+    if (!agents || typeof agents.create !== 'function') throw new Error('ctx.agents.create 不可用');
+    const presets = (await awaitService(ctx, 'agentPresets')) as
+      | { readonly defaultId?: string; list(): Promise<Array<{ id: string; broken?: string }>>; mount(a: unknown, id?: string): Promise<unknown> }
+      | undefined;
+    const { mkdir } = await import('node:fs/promises');
+    const { join } = await import('node:path');
+    const probeCwd = join(data.dir, 'probe-tmp');
+    await mkdir(probeCwd, { recursive: true });
+    const sessionId = `session-probe-policy-${Date.now()}`;
+    const appended: string[] = [];
+    const handle = await agents.create({
+      sessionId,
+      meta: { cwd: probeCwd },
+      setup: async (agentCtx: unknown, agent: unknown) => {
+        const registry = (agentCtx as { get(name: 'agentPresets'): { list(): Promise<Array<{ id: string; broken?: string }>>; readonly defaultId?: string; mount(a: unknown, id?: string): Promise<unknown> } | undefined }).get('agentPresets');
+        if (registry !== undefined) {
+          const roster = await registry.list();
+          const usable = roster.find((p) => p.id === registry.defaultId && p.broken === undefined) ?? roster.find((p) => p.broken === undefined);
+          if (usable !== undefined) await registry.mount(agentCtx, usable.id);
+        }
+        const session = (agent as { session?: { append(type: string, data: unknown): unknown } }).session;
+        if (session === undefined || typeof session.append !== 'function') throw new Error('Session.append 不可达');
+        session.append('sandbox/mode', { mode: 'danger-full-access', source: 'supervisor' });
+        session.append('approval/policy', { policy: 'never', source: 'supervisor' });
+        appended.push('sandbox/mode', 'approval/policy');
+      },
+    });
+    try {
+      await handle.dispose?.();
+    } catch {
+      // 清理尽力而为
+    }
+    return `append 成功（${appended.join(' + ')}），create 正常发布，会话已销毁`;
+  }));
+
   const report: ProbeReport = {
     ranAt: new Date().toISOString(),
     nodeVersion: process.version,

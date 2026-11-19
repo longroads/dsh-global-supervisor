@@ -152,7 +152,7 @@ describe('FB-17 createSession 就绪轮询', () => {
     const adapter = new DshAgentAdapter(fakeCtx({ agents }));
     const ready = await adapter.createSession('session-new', 'E:\\proj\\p1', { readyTimeoutMs: 2000 });
     expect(ready).toBe(true);
-    expect(agents.create).toHaveBeenCalledWith({ sessionId: 'session-new', meta: { cwd: 'E:\\proj\\p1' } });
+    expect(agents.create).toHaveBeenCalledWith(expect.objectContaining({ sessionId: 'session-new', meta: { cwd: 'E:\\proj\\p1' } }));
     expect(getCalls).toBeGreaterThanOrEqual(3);
   });
 

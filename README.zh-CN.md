@@ -54,7 +54,7 @@ dsh plugin --profile desktop update dsh-global-supervisor
 
 ## 状态
 
-当前版本 0.7.6：fresh_session 终局修复（真实宿主探针 VERIFIED）——编程创建会话按四要素配方装配：meta.cwd + meta.agentPreset + agentOptions 初始模型路由 + **setup 回调内 agentPresets.mount**（宿主子代理同款用法；meta.agentPreset 本身不触发装配——宿主源码与端到端探针双重实证）；预设目录适配双面服务（Host 面 remote-client：list/read，Agent 作用域完整面：mount）；探针新增 V8 装配验证与 V9 端到端（followup→inbox→推理→fs 工具→宿主机文件，9 秒实测）。31 个工具、274 个单测。
+当前版本 0.7.7：执行环境修复（FB-24/25 三合一死锁参数级化解）——编程创建会话在 setup 内向 Session 写入权限事件（宿主子代理同款机制）：sandbox/mode 默认 danger-full-access（可配 workspace-write/read-only；沙箱后端不可用环境的官方指引）+ approval/policy=never（审批永不挂起，触碰边界直接拒绝并如实 blocked——杜绝任务级会话"审批无人接收"死锁）；session_create/assign 新增 sandbox_mode 参数；watchdog idle 告警补审批挂起处置提示。31 个工具、275 个单测。
 
 ## License
 

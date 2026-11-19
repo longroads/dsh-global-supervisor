@@ -55,7 +55,7 @@ Full documentation ships inside the npm package (in Chinese) at `node_modules/ds
 
 ## Status
 
-Version 0.7.6 — the fresh_session endgame fix (probe-VERIFIED on a real host): programmatically created sessions now follow the four-element recipe — meta.cwd + meta.agentPreset (durable record) + an agentOptions initial model route + **agentPresets.mount inside the setup callback** (the same recipe the host's own subagents use; meta.agentPreset alone never armed tools — proven by host source and an end-to-end probe). The preset catalog adapts to the two-faced service (host ctx gets the remote-client subset with list/read; mount lives only on the agent-scoped face). Probes V8 (arm verification) and V9 (end-to-end: followup→inbox→inference→fs tool→host file, 9s measured) added. 31 tools, 274 unit tests.
+Version 0.7.7 — execution-environment fix (FB-24/25 triple deadlock resolved at the parameter level): programmatically created sessions now write policy events into their session log during setup (the same mechanism the host's own subagents use) — `sandbox/mode` defaults to `danger-full-access` (configurable via a new `sandbox_mode` parameter; the host's own guidance for sandbox-unavailable environments) and `approval/policy=never` (approvals never pend — boundary hits are rejected outright and the worker reports `blocked` honestly, eliminating the "no approval receiver" deadlock on task-scoped sessions). Watchdog idle alerts now suggest the cancel-and-redispatch remedy. 31 tools, 275 unit tests.
 
 ## License
 

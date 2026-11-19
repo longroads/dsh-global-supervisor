@@ -47,6 +47,8 @@ const agentSpies = {
 
 /** Agent 作用域预设装配记录（fake create 调 setup 时写入）。 */
 const presetMounts: Array<{ agentPreset: string }> = [];
+/** Session.append 权限事件记录（fake create 调 setup 时写入）。 */
+const sessionAppends: Array<{ type: string; data: Record<string, unknown> }> = [];
 
 function textOf(message: unknown): string {
   const content = (message as { content?: Array<{ text?: string }> }).content;
@@ -70,6 +72,7 @@ async function buildStack(seedProject = true, controllerTiming?: { queueWaitMs?:
   agentSpies.steers.length = 0;
   agentSpies.creates.length = 0;
   presetMounts.length = 0;
+  sessionAppends.length = 0;
   const projcacheDir = mkdtempSync(join(tmpdir(), 'projcache-tools-'));
   projcacheDirs.push(projcacheDir);
   writeFileSync(join(projcacheDir, `${WORKER_SESSION}.json`), JSON.stringify({ record: { rows: { title: { val: '切换cloud2bim会话模型为GLM-5.3' } } } }), 'utf8');
@@ -101,9 +104,12 @@ async function buildStack(seedProject = true, controllerTiming?: { queueWaitMs?:
     create: async (options: Record<string, unknown>) => {
       agentSpies.creates.push(options);
       createdSessions.add(String(options['sessionId']));
-      const setup = options['setup'] as ((agentCtx: unknown) => unknown) | undefined;
+      const setup = options['setup'] as ((agentCtx: unknown, agent: unknown) => unknown) | undefined;
       if (setup !== undefined) {
-        await setup({ get: (name: string) => (name === 'agentPresets' ? agentScopedPresets : undefined) });
+        await setup(
+          { get: (name: string) => (name === 'agentPresets' ? agentScopedPresets : undefined) },
+          { session: fakeSession },
+        );
       }
       return { agent: liveAgent, dispose: () => undefined };
     },
@@ -133,6 +139,11 @@ async function buildStack(seedProject = true, controllerTiming?: { queueWaitMs?:
     mount: async (agentCtx: unknown, id?: string) => {
       presetMounts.push({ agentPreset: id ?? '(default)' });
       return { id: id ?? 'standard' };
+    },
+  };
+  const fakeSession = {
+    append: (type: string, data: Record<string, unknown>) => {
+      sessionAppends.push({ type, data });
     },
   };
   const fakeCtx = {
@@ -650,6 +661,27 @@ describe('supervisor 工具权限与任务流', () => {
     const createOptions = agentSpies.creates[0] as { setup?: unknown };
     expect(typeof createOptions.setup).toBe('function');
     expect(presetMounts).toEqual([{ agentPreset: 'standard' }]);
+  });
+
+  it('0.7.7 权限事件：setup 内向 Session append sandbox/mode（默认 danger-full-access）+ approval/policy=never（FB-24/25 死锁解除）', async () => {
+    const stack = await buildStack();
+    const tools = buildSupervisorTools(stack);
+    const createTool = tools.find((t) => t.name === 'supervisor_session_create') as ToolDefinition;
+    const byDefault = await createTool.execute({ workspace_id: 'ws-1' }, execOf(ROUTER_SESSION));
+    expect((byDefault as { ok: boolean }).ok).toBe(true);
+    expect((byDefault as { sandbox_mode: string }).sandbox_mode).toBe('danger-full-access');
+    expect(sessionAppends).toContainEqual({ type: 'sandbox/mode', data: { mode: 'danger-full-access', source: 'supervisor' } });
+    expect(sessionAppends).toContainEqual({ type: 'approval/policy', data: { policy: 'never', source: 'supervisor' } });
+    // 显式 workspace-write：mode 事件随参、approval never 恒定
+    sessionAppends.length = 0;
+    const confined = await createTool.execute({ workspace_id: 'ws-1', agent_preset: 'standard', sandbox_mode: 'workspace-write' }, execOf(ROUTER_SESSION));
+    expect((confined as { ok: boolean }).ok).toBe(true);
+    expect((confined as { sandbox_mode: string }).sandbox_mode).toBe('workspace-write');
+    expect(sessionAppends).toContainEqual({ type: 'sandbox/mode', data: { mode: 'workspace-write', source: 'supervisor' } });
+    // 非法值拒绝
+    const invalid = await createTool.execute({ workspace_id: 'ws-1', sandbox_mode: 'yolo' }, execOf(ROUTER_SESSION));
+    expect((invalid as { ok: boolean }).ok).toBe(false);
+    expect((invalid as { error: string }).error).toContain('sandbox_mode');
   });
 
   it('supervisor_model_set 项目锚点：写偏好、目录校验通过，派发时应用 select', async () => {

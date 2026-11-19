@@ -90,7 +90,7 @@ export class AgentController {
   async createWorkerSession(
     cwd: string,
     actor: { sessionId?: string; role: 'router' | 'system' },
-    opts?: { agentPreset?: string; provider?: string; model?: string },
+    opts?: { agentPreset?: string; provider?: string; model?: string; sandboxMode?: 'danger-full-access' | 'workspace-write' | 'read-only' },
   ): Promise<string> {
     const { randomUUID } = await import('../utils/id.js');
     const sessionId = `session-${(await randomUUID())}`;
@@ -101,7 +101,7 @@ export class AgentController {
       action: 'session.create',
       targetType: 'session',
       targetId: sessionId,
-      detailJson: JSON.stringify({ cwd, liveReady: liveReady ? 1 : 0, ...(opts ?? {}) }),
+      detailJson: JSON.stringify({ cwd, liveReady: liveReady ? 1 : 0, sandboxMode: opts?.sandboxMode ?? 'danger-full-access', ...(opts ?? {}) }),
     });
     return sessionId;
   }

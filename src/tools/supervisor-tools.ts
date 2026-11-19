@@ -236,6 +236,7 @@ export function buildSupervisorTools(stack: SupervisorStack): ToolDefinition[] {
       session_id: { type: 'string', description: '指定执行会话（可选；不填用项目 Worker）' },
       fresh_session: { type: 'boolean', description: 'true 时为本任务新建专用会话（可选）' },
       agent_preset: { type: 'string', description: 'fresh_session 新建会话的宿主预设名（可选；预设决定工具集——不传则无执行类工具，任务将无法落盘，强烈建议传入）' },
+      sandbox_mode: { type: 'string', description: 'fresh_session 会话沙箱模式：danger-full-access（默认，系统级任务必需）/ workspace-write / read-only' },
     }, ['task_id']),
     resultSchema: RESULT,
     guard, guardDeniedMessage: DENIED,
@@ -253,9 +254,12 @@ export function buildSupervisorTools(stack: SupervisorStack): ToolDefinition[] {
         if (path === undefined) return { ok: false, error: `workspace-path-unresolved: ${workspaceId}` };
         const preset = await resolveAgentPreset(stack, optionalStringArg(record, 'agent_preset'));
         if (!preset.ok) return { ok: false, error: preset.error };
+        const sandboxMode = parseSandboxMode(optionalStringArg(record, 'sandbox_mode'));
+        if (sandboxMode === undefined) return { ok: false, error: 'sandbox_mode 必须是 danger-full-access / workspace-write / read-only 之一' };
         try {
           const sessionId = await stack.agentController.createWorkerSession(path, { sessionId: ctx.callerSessionId, role: 'router' }, {
             agentPreset: preset.preset.id,
+            sandboxMode,
             ...(await resolveSessionModelPref(stack, taskId)),
           });
           override = { sessionId };
@@ -771,6 +775,7 @@ export function buildSupervisorTools(stack: SupervisorStack): ToolDefinition[] {
     parameters: OBJ({
       workspace_id: { type: 'string', description: '受管 DSH workspace ID（须已纳管）' },
       agent_preset: { type: 'string', description: '宿主会话预设名（决定工具集；预设无效时创建报错并返回原因）' },
+      sandbox_mode: { type: 'string', description: '沙箱模式：danger-full-access（默认，系统级任务必需——沙箱后端不可用环境唯一可行）/ workspace-write / read-only' },
     }, ['workspace_id']),
     resultSchema: RESULT,
     guard, guardDeniedMessage: DENIED,
@@ -780,6 +785,8 @@ export function buildSupervisorTools(stack: SupervisorStack): ToolDefinition[] {
       const workspaceId = stringArg(record, 'workspace_id');
       const preset = await resolveAgentPreset(stack, optionalStringArg(record, 'agent_preset'));
       if (!preset.ok) return { ok: false, error: preset.error };
+      const sandboxMode = parseSandboxMode(optionalStringArg(record, 'sandbox_mode'));
+      if (sandboxMode === undefined) return { ok: false, error: 'sandbox_mode 必须是 danger-full-access / workspace-write / read-only 之一' };
       const project = await stack.workspaceManager.projectByWorkspace(workspaceId);
       if (!project) return { ok: false, error: `workspace-not-managed: ${workspaceId}（先 supervisor_workspace_adopt 纳管）` };
       const path = await resolveWorkspacePath(stack, workspaceId);
@@ -788,13 +795,14 @@ export function buildSupervisorTools(stack: SupervisorStack): ToolDefinition[] {
         const sessionId = await stack.agentController.createWorkerSession(
           path,
           { sessionId: ctx.callerSessionId, role: 'router' },
-          { agentPreset: preset.preset.id, ...(await resolveSessionModelPrefByProject(stack, project.projectId)) },
+          { agentPreset: preset.preset.id, sandboxMode, ...(await resolveSessionModelPrefByProject(stack, project.projectId)) },
         );
         return {
           ok: true,
           session_id: sessionId,
           workspace_id: workspaceId,
           preset: { id: preset.preset.id, source: preset.preset.source, name: preset.preset.name, description: preset.preset.description },
+          sandbox_mode: sandboxMode,
           ...(preset.preset.source === 'default' ? { warning: '使用宿主默认预设——若 Worker 汇报无执行工具，请 supervisor_preset_list 选含执行模块的预设后重建' } : {}),
           hints: [
             `绑定为项目 Worker：supervisor_workspace_update（workspace_id=${workspaceId}, worker_session_id=${sessionId}）`,
@@ -954,6 +962,13 @@ async function resolveAgentPreset(stack: SupervisorStack, explicit: string | und
 async function resolveWorkspacePath(stack: SupervisorStack, workspaceId: string): Promise<string | undefined> {
   const overview = await stack.workspaceManager.listWorkspaceOverview(true);
   return overview.find((item) => item.workspaceId === workspaceId)?.path;
+}
+
+/** 解析沙箱模式入参（非法值返回 undefined 由调用方拒绝；缺省 danger-full-access——FB-24/25）。 */
+function parseSandboxMode(raw: string | undefined): 'danger-full-access' | 'workspace-write' | 'read-only' | undefined {
+  if (raw === undefined) return 'danger-full-access';
+  if (raw === 'danger-full-access' || raw === 'workspace-write' || raw === 'read-only') return raw;
+  return undefined;
 }
 
 /** 解析 model_pref_json 的最小面（工具层自用，与 AgentController.parseModelPref 同构）。 */

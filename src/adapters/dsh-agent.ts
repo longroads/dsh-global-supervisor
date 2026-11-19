@@ -79,21 +79,27 @@ export class DshAgentAdapter {
    * （宿主对新会话不回退默认模型）；④ setup 回调内 agentCtx.get('agentPresets').mount(agentCtx, id)
    * ——预设装配的唯一真实入口（宿主 dsh-subagent/applyChildComposition 同款用法；meta.agentPreset
    * 本身不触发装配）。preset 未提供时不挂 setup（无装配裸会话，仅兼容显式放行场景）。
+   *
+   * FB-24/25 执行环境修复：setup 内向 Session append 权限事件（宿主 appendDelegatedPolicyOverrides
+   * 同款机制——session log 是权限状态的权威源）：sandbox/mode（默认 danger-full-access，绕开
+   * "后端不可用即失败"的沙箱链）+ approval/policy=never（审批永不挂起——触碰权限边界直接拒绝，
+   * Worker 如实 blocked 汇报而非死等，杜绝任务级会话"无人接收审批"死锁）。
    * create 返回与 registry 登记之间存在时序窗口（FB-17/18），故 create 后有界轮询直至可见。
    */
   async createSession(
     sessionId: string,
     cwd: string,
-    opts?: { readyTimeoutMs?: number; agentPreset?: string; provider?: string; model?: string },
+    opts?: { readyTimeoutMs?: number; agentPreset?: string; provider?: string; model?: string; sandboxMode?: 'danger-full-access' | 'workspace-write' | 'read-only' },
   ): Promise<boolean> {
     const agents = await this.agents();
     const route = opts?.provider !== undefined && opts?.model !== undefined ? { provider: opts.provider, model: opts.model } : undefined;
     const presetId = opts?.agentPreset;
+    const sandboxMode = opts?.sandboxMode ?? 'danger-full-access';
     const createOptions: CreateAgentOptions = {
       sessionId: sessionId as SessionId,
       meta: { cwd, ...(presetId !== undefined ? { agentPreset: presetId } : {}) },
       ...(route !== undefined ? { agentOptions: route } : {}),
-      ...(presetId !== undefined ? { setup: (agentCtx: Context) => this.mountPreset(agentCtx, presetId) } : {}),
+      setup: (agentCtx: Context, agent: Agent) => this.setupWorkerSession(agentCtx, agent, presetId, sandboxMode),
     };
     await agents.create(createOptions);
     const deadline = Date.now() + (opts?.readyTimeoutMs ?? 10_000);
@@ -101,6 +107,28 @@ export class DshAgentAdapter {
       if (agents.get(sessionId as SessionId) !== undefined) return true;
       if (Date.now() >= deadline) return false;
       await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+  }
+
+  /**
+   * 编程创建会话的初始化（setup 时机：Session 已建可写、Agent 未注册——首回合前生效）：
+   * ① 预设装配（有 preset 时）；② 权限事件 append（恒定）。
+   */
+  private async setupWorkerSession(agentCtx: Context, agent: Agent, presetId: string | undefined, sandboxMode: string): Promise<void> {
+    if (presetId !== undefined) {
+      await this.mountPreset(agentCtx, presetId);
+    }
+    const session = (agent as unknown as {
+      session?: { append(type: string, data: unknown): unknown };
+    }).session;
+    if (session === undefined || typeof session.append !== 'function') {
+      throw new Error('SESSION_UNAVAILABLE: Agent 未暴露 Session——权限事件无法写入（宿主版本差异）');
+    }
+    try {
+      session.append('sandbox/mode', { mode: sandboxMode, source: 'supervisor' });
+      session.append('approval/policy', { policy: 'never', source: 'supervisor' });
+    } catch (error) {
+      throw new Error(`权限事件写入失败：${error instanceof Error ? error.message : String(error)}`);
     }
   }
 
