@@ -55,7 +55,7 @@ Full documentation ships inside the npm package (in Chinese) at `node_modules/ds
 
 ## Status
 
-Version 0.7.9 — interaction contract (FB-27): dispatch instructions now explicitly forbid `ask_user_question` (task-scoped sessions have no terminal user — a popup pends forever and blocks every injected message); the sole human-decision channel is `worker_report(status=need_human, blockers/suggested_actions)`, with the Router deciding and steering the answer back. Idle alerts are now two-stage: a nudge with no response escalates to a "suspected interaction/approval hang" warning with the cancel-and-redispatch remedy. 31 tools, 278 unit tests.
+Version 0.7.10 — production-feedback batch (P1 group): the need_human loop is now fully closed — same-status reports are idempotent, a running heartbeat after the decision is steered in resumes the task (new `resumed` outcome), terminal reports arriving while waiting are adopted, and `supervisor_task_assign` auto-enqueues non-queued tasks so redispatch never hits an illegal transition; entering need_human now also releases the concurrency permit (paused tasks no longer occupy the dispatch window). Attempt numbers are max+1 (no more UNIQUE collisions on redispatch), worker_reports gained an `evidence` column, hot-reload panel routes are drained before re-registration, tool registration precedes HTTP routes, approval alerts back off exponentially, heartbeat-nudge dedupe keys include the session, and the guard denial message guides workers and routers separately. 31 tools, 284 unit tests.
 
 ## License
 

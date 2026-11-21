@@ -4,13 +4,13 @@ import type { TaskStatus } from '../../src/types/index.js';
 
 const ALL: TaskStatus[] = ['pending', 'queued', 'running', 'completed', 'blocked', 'need_human', 'failed', 'canceled'];
 
-/** 期望矩阵（DEVELOPMENT_PLAN §5.2 转换表 + 迟到汇报收编扩展 FB-1：queued/failed → 终态）。 */
+/** 期望矩阵（DEVELOPMENT_PLAN §5.2 转换表 + 迟到汇报收编扩展 FB-1：queued/failed → 终态；P1-6：need_human 决策闭环开放 running/completed/failed）。 */
 const EXPECTED: Record<TaskStatus, TaskStatus[]> = {
   pending: ['queued', 'canceled'],
   queued: ['running', 'completed', 'need_human', 'failed', 'canceled'],
   running: ['completed', 'blocked', 'need_human', 'failed', 'canceled'],
   blocked: ['queued', 'canceled'],
-  need_human: ['queued', 'canceled'],
+  need_human: ['queued', 'running', 'completed', 'failed', 'canceled'],
   failed: ['queued', 'completed', 'need_human', 'canceled'],
   completed: [],
   canceled: [],

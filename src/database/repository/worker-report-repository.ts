@@ -21,6 +21,7 @@ export interface WorkerReportRow {
   suggested_actions_json: string;
   received_at: string;
   applied: number;
+  evidence: string | null;
 }
 
 export class WorkerReportRepository {
@@ -36,11 +37,12 @@ export class WorkerReportRepository {
     blockersJson?: string;
     needHuman?: boolean;
     suggestedActionsJson?: string;
+    evidence?: string;
   }): number {
     const result = this.db
       .prepare(
-        `INSERT INTO worker_reports(task_id, session_id, status, progress, summary, blockers_json, need_human, suggested_actions_json, received_at, applied)
-         VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`,
+        `INSERT INTO worker_reports(task_id, session_id, status, progress, summary, blockers_json, need_human, suggested_actions_json, received_at, applied, evidence)
+         VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)`,
       )
       .run(
         input.taskId,
@@ -52,6 +54,7 @@ export class WorkerReportRepository {
         input.needHuman ? 1 : 0,
         input.suggestedActionsJson ?? '[]',
         now(),
+        input.evidence ?? null,
       );
     return Number(result.lastInsertRowid);
   }

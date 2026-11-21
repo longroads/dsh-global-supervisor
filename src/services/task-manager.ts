@@ -27,7 +27,7 @@ export interface Actor {
 /** applyWorkerReport 的结构化结果（机器消费值）。 */
 export interface ReportOutcome {
   accepted: boolean;
-  reason: 'applied' | 'heartbeat' | 'wrong-session' | 'task-missing' | 'invalid-transition' | 'adopted';
+  reason: 'applied' | 'heartbeat' | 'idempotent' | 'resumed' | 'wrong-session' | 'task-missing' | 'invalid-transition' | 'adopted';
   taskStatus: TaskStatus | null;
 }
 
@@ -148,7 +148,9 @@ export class TaskManager {
     withTransaction(this.db, () => {
       this.tasks.updateStatus(taskId, 'running');
       this.tasks.markDispatched(taskId, sessionId, timeoutAt);
-      this.runs.start({ taskId, sessionId, attemptNo: task.retry_count + 1 });
+      // attempt 以历史最大号递增（P1-5）：need_human 等收口不增 retry_count，
+      // 用 retry_count + 1 会在重派时撞 UNIQUE(task_id, attempt_no)。
+      this.runs.start({ taskId, sessionId, attemptNo: this.runs.maxAttemptNo(taskId) + 1 });
       this.audit.log({ actorRole: 'system', action: 'task.dispatch', targetType: 'task', targetId: taskId, detailJson: JSON.stringify({ sessionId }) });
     });
     return this.tasks.byId(taskId) as TaskRow;
@@ -188,19 +190,44 @@ export class TaskManager {
       blockersJson: JSON.stringify(report.blockers),
       needHuman: report.needHuman,
       suggestedActionsJson: JSON.stringify(report.suggestedActions),
+      evidence: report.evidence,
     });
     this.tasks.touchReport(report.taskId);
     const target = targetStatusOf(report.status);
+    if (task.status === 'need_human' && report.status === 'running') {
+      // 决策恢复（P1-6）：need_human 态收到 running 心跳 = 决策已注入、Worker 恢复执行——
+      // 显式转回 running（心跳本身无目标态，不经 targetStatusOf）。
+      assertTransition(task.status, 'running');
+      withTransaction(this.db, () => {
+        this.tasks.updateStatus(report.taskId, 'running');
+        this.reports.markApplied(reportId);
+        this.audit.log({
+          actorSessionId: callerSessionId,
+          actorRole: 'worker',
+          action: 'task.resume',
+          targetType: 'task',
+          targetId: report.taskId,
+        });
+      });
+      return { accepted: true, reason: 'resumed', taskStatus: 'running' };
+    }
     if (target === null) {
       this.reports.markApplied(reportId);
       return { accepted: true, reason: 'heartbeat', taskStatus: task.status };
+    }
+    if (target === task.status) {
+      // 同态汇报幂等放行（P1-6）：need_human 等人工期间 Worker 重申同态（补充选项/更新说明）
+      // 只更新汇报留档与心跳时间，不重复走状态机；blocked 同理。
+      this.reports.markApplied(reportId);
+      return { accepted: true, reason: 'idempotent', taskStatus: task.status };
     }
     if (task.status !== 'running') {
       // 迟到终态汇报收编（FB-1）：watchdog 误判判死后任务回到 queued/failed 待重试态，
       // 此时派发会话发来的终态汇报（completed/need_human/failed）真实有效——收编直达终态，
       // 取消 pending retry。仅在任务非 running 时生效：第二次 run 已开始（running）时
       // 迟到汇报属于上一 run，收编会误伤新 run，仍按 invalid-transition 拒收。
-      if ((task.status === 'queued' || task.status === 'failed') && target !== 'blocked') {
+      // need_human 同样开放收编（P1-6）：等待决策期间任务实际已出终局。
+      if ((task.status === 'queued' || task.status === 'failed' || task.status === 'need_human') && target !== 'blocked') {
         this.adoptTerminalReport(task, reportId, report, target);
         return { accepted: true, reason: 'adopted', taskStatus: target };
       }

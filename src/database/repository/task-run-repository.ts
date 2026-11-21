@@ -19,6 +19,14 @@ export class TaskRunRepository {
     return Number(result.lastInsertRowid);
   }
 
+  /** 该任务历史最大 attempt 号（无记录时 0）——新 attempt 恒为 max + 1，与 retry_count 解耦。 */
+  maxAttemptNo(taskId: string): number {
+    const row = this.db
+      .prepare('SELECT COALESCE(MAX(attempt_no), 0) AS maxNo FROM task_runs WHERE task_id = ?')
+      .get(taskId) as { maxNo: number } | undefined;
+    return row?.maxNo ?? 0;
+  }
+
   /** 结束一次尝试并写入终局。 */
   finish(id: number, outcome: RunOutcome, detail: { resultSummary?: string; errorMessage?: string; usageJson?: string } = {}): boolean {
     const result = this.db

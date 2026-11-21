@@ -304,8 +304,15 @@ export function apply(ctx: Context, config: PluginConfig): void {
         stack.eventManager.on('*', (event) => {
           void stack.eventRouter.route(event);
         });
+        // 工具注册前置（P0-1 复盘）：执行面是插件的本体，面板路由（HTTP）放最后且独立 try/catch——
+        // 任何面板侧失败都不再可能拖累 supervisor_* 工具的注册时序
+        const { buildSupervisorTools } = await import('./tools/supervisor-tools.js');
+        const { buildWorkerReportTool } = await import('./tools/worker-report-tool.js');
+        const all = [...buildSupervisorTools(stack), buildWorkerReportTool(stack)];
+        for (const tool of all) {
+          tools.register(tool);
+        }
         // 设置面板 HTTP API（Router 身份管理入口；契约见 docs/UI_PANEL_PLAN.md）
-        // 热重载事故修复（2026-11-17 反馈）：面板路由注册失败只影响面板，工具注册不再被拖死
         try {
           const { registerSettingsApi } = await import('./services/settings-api.js');
           await registerSettingsApi(ctx, stack, config.events);
@@ -313,12 +320,6 @@ export function apply(ctx: Context, config: PluginConfig): void {
           const message = error instanceof Error ? error.stack ?? error.message : String(error);
           void writeLoadMarker('settings-api-failed', { message });
           ctx.logger.error(`设置面板 API 注册失败（supervisor 工具不受影响）：${message}`);
-        }
-        const { buildSupervisorTools } = await import('./tools/supervisor-tools.js');
-        const { buildWorkerReportTool } = await import('./tools/worker-report-tool.js');
-        const all = [...buildSupervisorTools(stack), buildWorkerReportTool(stack)];
-        for (const tool of all) {
-          tools.register(tool);
         }
         void writeLoadMarker('stack-ready', { tools: all.length, dataDir: stack.dataDir, router: config.routerSessionId });
         ctx.logger.info(`dsh-global-supervisor 服务栈就绪：${all.length} 个工具已注册`);

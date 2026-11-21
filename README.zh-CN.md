@@ -54,7 +54,7 @@ dsh plugin --profile desktop update dsh-global-supervisor
 
 ## 状态
 
-当前版本 0.7.9：交互契约（FB-27）——派发指令明令禁用 ask_user_question（任务级会话无终端用户，弹窗即永久挂起阻塞一切注入），人工决策唯一出口收敛为 worker_report(need_human, blockers/suggested_actions)——Router 代决策后 steer 回传闭环；idle 告警两段化（催告无响应 → 疑似交互/审批挂起告警 + cancel 重派处置）。31 个工具、278 个单测。
+当前版本 0.7.10：生产反馈批量修复（P1 组）——need_human 决策闭环四路全通（同态汇报幂等 / 决策注入后 running 心跳自动恢复（resumed）/ 等待期间终局收编 / assign 自动入队重派不撞状态机），need_human 收口即释放并发许可；attempt 号改 max+1（重派不撞唯一约束）；worker_reports 补 evidence 列（证据可回读）；热重载面板路由先释放再注册（不再沿用已销毁实例的陈旧闭包）+ 工具注册前置；approval 告警指数退避；催告去抖键含会话；guard 拒绝文案按角色双指引。31 个工具、284 个单测。
 
 ## License
 

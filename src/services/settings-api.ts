@@ -17,19 +17,46 @@ interface WebServerLike {
 }
 
 /**
+ * 模块级路由释放注册表（跨插件实例共享）：热重载时旧 fiber 的 effect 清理可能晚于
+ * 新实例 apply，旧路由未释放即注册会撞 duplicate——registerSettingsApi 开头先 drain
+ * 全部旧路由，新实例用自己的 stack 重新注册，杜绝 WARN 分支沿用已销毁 fiber 闭包
+ * 的陈旧面板（P0-1 遗留尾巴）。
+ */
+let routeDisposers: Array<() => void> = [];
+
+function drainRouteDisposers(logger: { warn(message: string): void }): void {
+  const pending = routeDisposers;
+  routeDisposers = [];
+  for (const dispose of pending) {
+    try {
+      dispose();
+    } catch (error) {
+      logger.warn(`旧面板路由释放失败（不阻塞新实例注册）：${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+}
+
+/**
  * 注册单条面板路由（热重载安全，生产反馈 2026-11-17 事故修复）：
- * - disposer 经 ctx.effect 绑定插件 fiber 生命周期——插件卸载（含热升级换载）时自动释放路由；
- * - 旧实例路由未释放导致的 duplicate 注册错误降级为警告并沿用旧路由（不再让整条服务栈崩溃，
- *   否则工具注册被跳过，插件陷入"管理面活着、执行面全灭"的半死状态）。
+ * - 释放走双重通道：模块级注册表（新实例 drain 用）+ ctx.effect（fiber 卸载用），幂等守卫防双调；
+ * - 极端并发下仍撞 duplicate 时降级警告（不再让整条服务栈崩溃，工具注册不受影响）。
  */
 function registerRoute(ctx: Context, webServer: WebServerLike, route: { path: string }): void {
   try {
-    const dispose = webServer.register(route);
+    const raw = webServer.register(route);
+    let released = false;
+    const dispose = (): void => {
+      if (released) return;
+      released = true;
+      routeDisposers = routeDisposers.filter((item) => item !== dispose);
+      raw();
+    };
+    routeDisposers.push(dispose);
     ctx.effect(() => dispose);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     if (!message.includes('duplicate')) throw error;
-    ctx.logger.warn(`settings 路由 ${route.path} 注册撞车（热重载旧实例未释放，沿用旧路由）：${message}`);
+    ctx.logger.warn(`settings 路由 ${route.path} 注册撞车（沿模块级注册表已 drain 后仍并发，忽略）：${message}`);
   }
 }
 
@@ -104,6 +131,7 @@ export function redact(text: string): string {
 /** 注册设置 API 路由（幂等调用方保证一次性；webhookOptions 为 Webhook 事件路由配置）。 */
 export async function registerSettingsApi(ctx: Context, stack: SupervisorStack, webhookOptions?: WebhookEventOptions): Promise<void> {
   const webServer = await awaitService<WebServerLike>(ctx, 'webServer');
+  drainRouteDisposers(ctx.logger);
 
   const settingsRoute = {
     kind: 'exact',

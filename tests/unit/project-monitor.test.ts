@@ -169,6 +169,26 @@ describe('ProjectMonitor 四分类增强（Phase 5-C）', () => {
     expect(notified[0]?.message).toContain(taskId);
   });
 
+  it('P2-9b approval 告警指数退避：窗口 ×2 内的第二轮扫描不重复催', async () => {
+    const notified: Notice[] = [];
+    const { monitor, manager, db } = await setup({
+      approvalTimeoutMs: 1_000,
+      startingTimeoutMs: 60 * 60 * 1000,
+      notify: async (message, severity) => {
+        notified.push({ message, severity });
+        return true;
+      },
+    });
+    const taskId = runningTask(manager, futureIso());
+    manager.applyWorkerReport(parseWorkerReport({ workspace_id: 'ws-1', task_id: taskId, status: 'need_human', need_human: true, summary: '等确认' }), WORKER);
+    db.prepare('UPDATE tasks SET last_report_at = ? WHERE id = ?').run(pastIso(), taskId);
+    await monitor.scanOnce();
+    await monitor.scanOnce();
+    await monitor.scanOnce();
+    // 退避 = 窗口 ×2^n（首轮后至少 2s 静默）：三次紧邻扫描只应告警一次
+    expect(notified).toHaveLength(1);
+  });
+
   it('idle：Worker 会话空闲过久且无汇报 → 先催告心跳再 warning 升级（FB-11 两段式；推送隔离下验证）', async () => {
     const notified: Notice[] = [];
     const { monitor, manager, db, steers } = await setup(

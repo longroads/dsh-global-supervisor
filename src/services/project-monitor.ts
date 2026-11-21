@@ -92,8 +92,10 @@ export class ProjectMonitor {
   private armedIntervalMs = 0;
   /** lost 双探：上一轮扫描中 Agent 缺失的任务（连续两轮缺失才判 lost）。 */
   private readonly lostSuspects = new Set<string>();
-  /** 心跳催告去抖：key = taskId，value = 上次催告毫秒时间戳（窗口 = idleStaleMs）。 */
+  /** 心跳催告去抖：key = taskId:sessionId（含会话，跨会话换绑即新窗口），value = 上次催告毫秒时间戳（窗口 = idleStaleMs）。 */
   private readonly nudgedAt = new Map<string, number>();
+  /** need_human 升级告警退避（P2-9b）：key = taskId，value = 已报次数与上次时间（间隔 = 窗口 ×2^n，上限 24h）。 */
+  private readonly approvalNotified = new Map<string, { count: number; lastAt: number }>();
   /** 上次进度推送毫秒时间戳（0 = 尚未推送过，首轮即推）。 */
   private progressPushedAt = 0;
   /** 停滞对照（0.7.8 假死检测）：上次快照的 progress/summary 与首次停滞时刻；内存态，重启后重新观测。 */
@@ -213,8 +215,18 @@ export class ProjectMonitor {
     for (const task of this.taskManager.tasks.list({ status: 'need_human' })) {
       const since = Date.parse(task.last_report_at ?? task.updated_at);
       if (Number.isNaN(since) || Date.now() - since < this.approvalTimeoutMs()) continue;
+      // 指数退避（P2-9b）：首报立即，之后按窗口 ×2^n 递增（上限 24h）——无人处理时不再每轮轰炸
+      const state = this.approvalNotified.get(task.id);
+      const now = Date.now();
+      const backoffMs = Math.min(this.approvalTimeoutMs() * 2 ** (state?.count ?? 0), 24 * 60 * 60 * 1000);
+      if (state !== undefined && now - state.lastAt < backoffMs) continue;
+      this.approvalNotified.set(task.id, { count: (state?.count ?? 0) + 1, lastAt: now });
       result.needHumanEscalated.push(task.id);
-      await this.options.notify?.(`任务 ${task.id} 等待人工决策已超过 ${Math.round(this.approvalTimeoutMs() / 1000)}s，请处理`, 'critical');
+      await this.options.notify?.(`任务 ${task.id} 等待人工决策已超过 ${Math.round(this.approvalTimeoutMs() / 1000)}s（第 ${(state?.count ?? 0) + 1} 次提醒），请处理`, 'critical');
+    }
+    const needHumanIds = new Set(this.taskManager.tasks.list({ status: 'need_human' }).map((task) => task.id));
+    for (const taskId of this.approvalNotified.keys()) {
+      if (!needHumanIds.has(taskId)) this.approvalNotified.delete(taskId);
     }
     // 运行期可见性（FB-12/13，零 LLM）：每轮产出 running 任务进度快照与巡检摘要事件；
     // 推送间隔到点且有运行中任务时向 Router/IM 汇总一条
@@ -301,11 +313,13 @@ export class ProjectMonitor {
 
   /** 心跳催告（FB-11）：idleStale 窗口内每任务只催一次；steer 失败不记去抖（下轮重试）。 */
   private async nudgeHeartbeat(taskId: string, assignedSessionId: string, idleStaleMs: number): Promise<boolean> {
-    const last = this.nudgedAt.get(taskId);
+    // 去抖键含会话（P2-9d）：跨会话换绑（重派到新会话）后旧窗口不再压制新会话的首催
+    const dedupeKey = `${taskId}:${assignedSessionId}`;
+    const last = this.nudgedAt.get(dedupeKey);
     if (last !== undefined && Date.now() - last < idleStaleMs) return false;
     try {
       await this.agentController.steerTask(taskId, HEARTBEAT_NUDGE(Math.round(idleStaleMs / 60000)), { role: 'system' });
-      this.nudgedAt.set(taskId, Date.now());
+      this.nudgedAt.set(dedupeKey, Date.now());
       return true;
     } catch {
       return false;

@@ -606,6 +606,24 @@ describe('supervisor 工具权限与任务流', () => {
     expect(instruction).toContain('status=need_human');
   });
 
+  it('P1-4 need_human 恢复闭环：assign 自动入队重派，attempt 恒为 max+1', async () => {
+    const stack = await buildStack();
+    const task = stack.taskManager.createTask({ projectId: 'proj-1', title: '需决策任务' }, { sessionId: ROUTER_SESSION, role: 'router' });
+    stack.taskManager.enqueue(task.id, { sessionId: ROUTER_SESSION, role: 'router' });
+    await stack.agentController.dispatchTask(task.id);
+    // 经 controller 层汇报（与生产 worker_report 工具同链路）：need_human 收口即释放并发许可
+    const outcome = stack.agentController.applyWorkerReport(
+      parseWorkerReport({ workspace_id: 'ws-1', task_id: task.id, status: 'need_human', need_human: true, blockers: ['选哪个？'] }),
+      'session-worker-a',
+    );
+    expect(outcome).toEqual({ accepted: true, reason: 'applied', taskStatus: 'need_human' });
+    // need_human 态直接 assign：自动 enqueue → dispatch，不再撞非法转换（P1-4）
+    const reDispatch = await stack.agentController.dispatchTask(task.id);
+    expect(reDispatch.dispatched).toBe(true);
+    expect(stack.taskManager.tasks.byId(task.id)?.status).toBe('running');
+    expect(stack.taskManager.runs.byTask(task.id).map((r) => r.attempt_no)).toEqual([1, 2]);
+  }, 15_000);
+
   it('FB-18 队列等待上限：许可被占时排队超时返回 queue-timeout，迟到许可被归还不泄漏', async () => {
     const stack = await buildStack(true, { queueWaitMs: 100 });
     const first = stack.taskManager.createTask({ projectId: 'proj-1', title: 'A' }, { sessionId: ROUTER_SESSION, role: 'router' });

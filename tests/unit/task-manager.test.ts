@@ -322,9 +322,9 @@ describe('TaskManager 迟到终态汇报收编（FB-1/FB-3，事故时间线 tas
       parseWorkerReport({ workspace_id: 'ws-1', task_id: task.id, status: 'failed', blockers: ['环境异常'] }),
       WORKER,
     );
-    expect(outcome).toEqual({ accepted: true, reason: 'adopted', taskStatus: 'failed' });
+    expect(outcome).toEqual({ accepted: true, reason: 'idempotent', taskStatus: 'failed' });
     expect(manager.reports.latestOf(task.id)?.applied).toBe(1);
-    expect(manager.audit.byTarget('task', task.id).some((a) => a.action === 'worker_report.adopted')).toBe(true);
+    expect(manager.audit.byTarget('task', task.id).some((a) => a.action === 'worker_report.rejected')).toBe(false);
     db.close();
   });
 
@@ -339,6 +339,90 @@ describe('TaskManager 迟到终态汇报收编（FB-1/FB-3，事故时间线 tas
     );
     expect(outcome).toEqual({ accepted: true, reason: 'applied', taskStatus: 'completed' });
     expect(manager.audit.byTarget('task', task.id).some((a) => a.action === 'worker_report.applied')).toBe(true);
+    db.close();
+  });
+
+  it('P1-6 need_human 决策闭环：同态幂等 / running 恢复 / 终态收编三路全通', async () => {
+    const { manager, db } = await setup();
+    const task = manager.createTask({ projectId: 'proj-1', title: '决策型任务' }, ROUTER);
+    manager.enqueue(task.id, ROUTER);
+    manager.markDispatched(task.id, WORKER, null);
+    const ask = manager.applyWorkerReport(
+      parseWorkerReport({ workspace_id: 'ws-1', task_id: task.id, status: 'need_human', need_human: true, blockers: ['选方案 1 还是 2？'], suggested_actions: ['方案1', '方案2'] }),
+      WORKER,
+    );
+    expect(ask).toEqual({ accepted: true, reason: 'applied', taskStatus: 'need_human' });
+    expect(manager.tasks.byId(task.id)?.status).toBe('need_human');
+
+    const restate = manager.applyWorkerReport(
+      parseWorkerReport({ workspace_id: 'ws-1', task_id: task.id, status: 'need_human', need_human: true, summary: '补充：方案 1 有内存风险' }),
+      WORKER,
+    );
+    expect(restate).toEqual({ accepted: true, reason: 'idempotent', taskStatus: 'need_human' });
+    expect(manager.reports.latestOf(task.id)?.applied).toBe(1);
+
+    const resume = manager.applyWorkerReport(
+      parseWorkerReport({ workspace_id: 'ws-1', task_id: task.id, status: 'running', progress: 60, summary: '收到决策，继续执行' }),
+      WORKER,
+    );
+    expect(resume).toEqual({ accepted: true, reason: 'resumed', taskStatus: 'running' });
+    expect(manager.tasks.byId(task.id)?.status).toBe('running');
+
+    const finish = manager.applyWorkerReport(
+      parseWorkerReport({ workspace_id: 'ws-1', task_id: task.id, status: 'completed', summary: '按方案 2 完成' }),
+      WORKER,
+    );
+    expect(finish).toEqual({ accepted: true, reason: 'applied', taskStatus: 'completed' });
+    db.close();
+  });
+
+  it('P1-6 等待决策期间任务已出终局：need_human 态 completed 汇报收编', async () => {
+    const { manager, db } = await setup();
+    const task = manager.createTask({ projectId: 'proj-1', title: 'T' }, ROUTER);
+    manager.enqueue(task.id, ROUTER);
+    manager.markDispatched(task.id, WORKER, null);
+    manager.applyWorkerReport(
+      parseWorkerReport({ workspace_id: 'ws-1', task_id: task.id, status: 'need_human', need_human: true, blockers: ['需确认'] }),
+      WORKER,
+    );
+    expect(manager.tasks.byId(task.id)?.status).toBe('need_human');
+    const outcome = manager.applyWorkerReport(
+      parseWorkerReport({ workspace_id: 'ws-1', task_id: task.id, status: 'completed', summary: '等决策期间已顺手完成' }),
+      WORKER,
+    );
+    expect(outcome).toEqual({ accepted: true, reason: 'adopted', taskStatus: 'completed' });
+    expect(manager.reports.latestOf(task.id)?.applied).toBe(1);
+    db.close();
+  });
+
+  it('P1-5 attempt 恒为 max+1：need_human 收口重派不撞 UNIQUE(task_id, attempt_no)', async () => {
+    const { manager, db } = await setup();
+    const task = manager.createTask({ projectId: 'proj-1', title: 'T' }, ROUTER);
+    manager.enqueue(task.id, ROUTER);
+    manager.markDispatched(task.id, WORKER, null);
+    manager.applyWorkerReport(
+      parseWorkerReport({ workspace_id: 'ws-1', task_id: task.id, status: 'need_human', need_human: true, blockers: ['?'] }),
+      WORKER,
+    );
+    // need_human 收口不增 retry_count——重入队重派必须仍能开出新 attempt
+    manager.enqueue(task.id, ROUTER);
+    manager.markDispatched(task.id, WORKER, null);
+    const runs = manager.runs.byTask(task.id);
+    expect(runs).toHaveLength(2);
+    expect(runs.map((r) => r.attempt_no)).toEqual([1, 2]);
+    db.close();
+  });
+
+  it('P1-7 evidence 落库：汇报原文带证据路径，latestOf 可回读', async () => {
+    const { manager, db } = await setup();
+    const task = manager.createTask({ projectId: 'proj-1', title: 'T' }, ROUTER);
+    manager.enqueue(task.id, ROUTER);
+    manager.markDispatched(task.id, WORKER, null);
+    manager.applyWorkerReport(
+      parseWorkerReport({ workspace_id: 'ws-1', task_id: task.id, status: 'completed', summary: '完成', evidence: 'E:\\out\\result.md' }),
+      WORKER,
+    );
+    expect(manager.reports.latestOf(task.id)?.evidence).toBe('E:\\out\\result.md');
     db.close();
   });
 

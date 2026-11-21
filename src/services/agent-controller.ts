@@ -127,6 +127,12 @@ export class AgentController {
     if (this.taskManager.adoptLateReport(taskId, { role: 'system' })) {
       return { dispatched: false, reason: 'adopted', taskId };
     }
+    // 非 queued 一律先入队再派发（P1-4）：pending/need_human/blocked/failed 直接 markDispatched
+    // 会撞非法转换（need_human → running），assign 成为唯一恢复出口；依赖未完成的 pending
+    // 在此报"前置任务未完成"而非状态机错误。
+    if (task.status !== 'queued') {
+      this.taskManager.enqueue(taskId, { role: 'system' });
+    }
     const project = this.taskManager.projects.byId(task.project_id);
     const workerSession = sessionOverride?.sessionId ?? project?.worker_session_id ?? undefined;
     if (!workerSession) return { dispatched: false, reason: 'no-worker-session', taskId };
@@ -217,7 +223,11 @@ export class AgentController {
     const lastBefore = this.taskManager.reports.latestOf(report.taskId);
     const outcome = this.taskManager.applyWorkerReport(report, callerSessionId);
     if (outcome.accepted) {
-      if (outcome.reason === 'applied' || outcome.reason === 'adopted') {
+      // need_human 收口即释放许可（P1-6）：任务暂停等人工，不再占用并发窗口——
+      // 决策后重派（assign）或恢复汇报（resumed）重新进入队列获取；resumed 恢复的
+      // running 任务无 permit，终态释放为幂等 no-op（无害）。
+      if (outcome.reason === 'applied' || outcome.reason === 'adopted'
+        || (outcome.reason === 'idempotent' && outcome.taskStatus === 'need_human')) {
         const permit = this.permits.get(report.taskId);
         if (permit) {
           permit.release();

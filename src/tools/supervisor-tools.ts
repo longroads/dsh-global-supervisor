@@ -19,7 +19,7 @@ function routerGuard(stack: SupervisorStack) {
   return (caller: string) => stack.routerIdentity.isRouter(caller);
 }
 
-const DENIED = '仅 Router 会话可调用 supervisor 工具（首次使用可在目标会话调用 supervisor_claim_router 认领）';
+const DENIED = '仅 Router 会话可调用 supervisor 工具。Worker 会话请使用 worker_report 汇报任务进展；如需将本会话设为 Router，请在会话内直接调用 supervisor_claim_router 认领';
 
 const OBJ = (properties: Record<string, unknown>, required: string[] = []): Record<string, unknown> => ({
   type: 'object',

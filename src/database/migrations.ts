@@ -245,6 +245,11 @@ export const MIGRATIONS: readonly Migration[] = [
       );
     `,
   },
+  {
+    version: 9,
+    name: 'worker-report-evidence',
+    up: `ALTER TABLE worker_reports ADD COLUMN evidence TEXT;`,
+  },
 ];
 
 /** 迁移执行器：按 version 升序应用未执行的迁移，每条独立事务。 */
